@@ -1,5 +1,6 @@
 using Amazon.CDK;
 using Amazon.CDK.AWS.EC2;
+using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Constructs;
 
 namespace InfraCdk
@@ -116,6 +117,53 @@ namespace InfraCdk
                 SubnetId = privateSubnet2.SubnetId,
                 RouteTableId = privateRouteTable.Ref
             });
+
+            // Security Group cho ALB
+            var albSecurityGroup = new SecurityGroup(this, "ALBSecurityGroup", new SecurityGroupProps
+            {
+                Vpc = vpc,
+                AllowAllOutbound = true,
+                Description = "Security group for Application Load Balancer"
+            });
+            albSecurityGroup.AddIngressRule(Peer.AnyIpv4(), Port.Tcp(80), "Allow HTTP traffic from anywhere");
+            albSecurityGroup.AddEgressRule(Peer.AnyIpv4(), Port.Tcp(443), "Allow HTTPS traffic to anywhere");
+
+            // ALB sẽ được triển khai trong public subnet, nên gắn security group của ALB vào public subnet
+            var alb = new ApplicationLoadBalancer(this, "MyALB", new ApplicationLoadBalancerProps
+            {
+                Vpc = vpc,
+                InternetFacing = true,
+                LoadBalancerName = "MyALB",
+                SecurityGroup = albSecurityGroup,
+                VpcSubnets = new SubnetSelection
+                {
+                    Subnets = new ISubnet[] { publicSubnet1, publicSubnet2 }
+                }
+            });
+            // Tạo listener cho ALB
+            var listener = alb.AddListener("Listener", new BaseApplicationListenerProps
+            {
+                Port = 80,
+                Open = true
+            });
+
+            // Security Group cho ECS Fargate
+            var ecsSecurityGroup = new SecurityGroup(this, "ECSSecurityGroup", new SecurityGroupProps
+            {
+                Vpc = vpc,
+                AllowAllOutbound = true,
+                Description = "Security group for ECS Fargate tasks"
+            });
+            ecsSecurityGroup.AddIngressRule(albSecurityGroup, Port.Tcp(80), "Allow HTTP traffic from ALB");
+
+            // Security Group cho RDS
+            var rdsSecurityGroup = new SecurityGroup(this, "RDSSecurityGroup", new SecurityGroupProps
+            {
+                Vpc = vpc,
+                AllowAllOutbound = true,
+                Description = "Security group for RDS instance"
+            });
+            rdsSecurityGroup.AddIngressRule(ecsSecurityGroup, Port.Tcp(3306), "Allow MySQL traffic from ECS tasks");
         }
     }
 }
