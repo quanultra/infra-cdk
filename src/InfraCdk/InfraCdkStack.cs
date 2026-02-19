@@ -6,6 +6,7 @@ using Amazon.CDK.AWS.ECS;
 using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Amazon.CDK.AWS.IAM;
 using Amazon.CDK.AWS.RDS;
+using Amazon.CDK.AWS.WAFv2;
 using Constructs;
 
 namespace InfraCdk
@@ -333,6 +334,62 @@ namespace InfraCdk
                         Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 }
                     }
                 }
+            });
+
+            // Tạo CloudWatch Log Group để Fargate Service có thể ghi log (giúp theo dõi và debug ứng dụng)
+            var logGroup = new Amazon.CDK.AWS.Logs.LogGroup(this, "FargateLogGroup", new Amazon.CDK.AWS.Logs.LogGroupProps
+            {
+                LogGroupName = "/ecs/fargate-service-logs",
+                Retention = Amazon.CDK.AWS.Logs.RetentionDays.ONE_WEEK,
+                RemovalPolicy = RemovalPolicy.DESTROY // Chỉ dùng cho môi trường dev/test
+            });
+
+            // Tạo WAF (Web Application Firewall) để bảo vệ ALB khỏi các mối đe dọa web phổ biến, gắn WAF vào ALB
+            var webAcl = new CfnWebACL(this, "WebACL", new CfnWebACLProps
+            {
+                DefaultAction = new CfnWebACL.DefaultActionProperty
+                {
+                    Allow = new CfnWebACL.AllowActionProperty()
+                },
+                Scope = "REGIONAL",
+                VisibilityConfig = new CfnWebACL.VisibilityConfigProperty
+                {
+                    SampledRequestsEnabled = true,
+                    CloudWatchMetricsEnabled = true,
+                    MetricName = "WebACLMetric"
+                },
+                Rules = new[]
+                {
+                    new CfnWebACL.RuleProperty
+                    {
+                        Name = "AWS-AWSManagedRulesCommonRuleSet",
+                        Priority = 1,
+                        OverrideAction = new CfnWebACL.OverrideActionProperty
+                        {
+                            None = new object()
+                        },
+                        Statement = new CfnWebACL.StatementProperty
+                        {
+                            ManagedRuleGroupStatement = new CfnWebACL.ManagedRuleGroupStatementProperty
+                            {
+                                VendorName = "AWS",
+                                Name = "AWSManagedRulesCommonRuleSet"
+                            }
+                        },
+                        VisibilityConfig = new CfnWebACL.VisibilityConfigProperty
+                        {
+                            SampledRequestsEnabled = true,
+                            CloudWatchMetricsEnabled = true,
+                            MetricName = "AWSManagedRulesCommonRuleSetMetric"
+                        }
+                    }
+                }
+            });
+            // Gắn WAF vào ALB
+            new CfnWebACLAssociation(this, "WebACLAssociation", new CfnWebACLAssociationProps
+            {
+                ResourceArn = alb.LoadBalancerArn,
+                WebAclArn = webAcl.AttrArn
             });
 
         }
