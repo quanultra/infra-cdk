@@ -4,6 +4,8 @@ using Amazon.CDK.AWS.ApplicationAutoScaling;
 using Amazon.CDK.AWS.EC2;
 using Amazon.CDK.AWS.ECS;
 using Amazon.CDK.AWS.ElasticLoadBalancingV2;
+using Amazon.CDK.AWS.IAM;
+using Amazon.CDK.AWS.RDS;
 using Constructs;
 
 namespace InfraCdk
@@ -229,6 +231,81 @@ namespace InfraCdk
                 ScaleInCooldown = Duration.Seconds(60),
                 ScaleOutCooldown = Duration.Seconds(60)
             });
+
+            // Tạo RDS subnet group để RDS instance có thể sử dụng 2 private subnet
+            var rdsSubnetGroup = new SubnetGroup(this, "RDSSubnetGroup", new SubnetGroupProps
+            {
+                Vpc = vpc,
+                SubnetGroupName = "RDSSubnetGroup",
+                Description = "Subnet group for RDS instance",
+                VpcSubnets = new SubnetSelection
+                {
+                    Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 }
+                }
+            });
+
+            // Tạo Aurora MySQL cluster trong private subnet, gắn security group, chỉ định thông số cơ bản
+            var auroraCluster = new DatabaseCluster(this, "MyAuroraCluster", new DatabaseClusterProps
+            {
+                Engine = DatabaseClusterEngine.AuroraMysql(new AuroraMysqlClusterEngineProps
+                {
+                    Version = AuroraMysqlEngineVersion.VER_3_04_0
+                }),
+                Writer = ClusterInstance.Provisioned("writer", new ProvisionedClusterInstanceProps
+                {
+                    InstanceType = Amazon.CDK.AWS.EC2.InstanceType.Of(
+                        InstanceClass.BURSTABLE3,
+                        InstanceSize.MEDIUM
+                    ),
+                    PubliclyAccessible = false
+                }),
+                Readers = new IClusterInstance[] {
+                    ClusterInstance.Provisioned("reader", new ProvisionedClusterInstanceProps {
+                        InstanceType = Amazon.CDK.AWS.EC2.InstanceType.Of(
+                            InstanceClass.BURSTABLE3,
+                            InstanceSize.MEDIUM
+                        ),
+                        PubliclyAccessible = false
+                    })
+                },
+                Vpc = vpc,
+                VpcSubnets = new SubnetSelection
+                {
+                    Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 }
+                },
+                SecurityGroups = new[] { rdsSecurityGroup },
+                SubnetGroup = rdsSubnetGroup,
+                DefaultDatabaseName = "mydatabase",
+                RemovalPolicy = RemovalPolicy.DESTROY // Chỉ dùng cho môi trường dev/test
+            });
+
+            // Proxy cho phép Fargate Service kết nối đến RDS cluster qua endpoint của cluster (sử dụng RDS Proxy để quản lý kết nối hiệu quả hơn)
+            // Proxy role
+            var proxyRole = new Role(this, "RDSProxyRole", new RoleProps
+            {
+                AssumedBy = new ServicePrincipal("rds.amazonaws.com"),
+                ManagedPolicies = new[] {
+                    ManagedPolicy.FromAwsManagedPolicyName("AmazonRDSProxyReadOnlyAccess"),
+                    ManagedPolicy.FromAwsManagedPolicyName("service-role/AmazonRDSProxyServiceRolePolicy")
+                }
+            });
+            // Tạo RDS Proxy, gắn vào Aurora cluster, chỉ định IAM role và security group cho proxy
+            var rdsProxy = new DatabaseProxy(this, "RDSProxy", new DatabaseProxyProps
+            {
+                ProxyTarget = ProxyTarget.FromCluster(auroraCluster),
+                Secrets = auroraCluster.Secret != null ? new[] { auroraCluster.Secret } : null,
+                Vpc = vpc,
+                SecurityGroups = new[] { rdsSecurityGroup },
+                Role = proxyRole,
+                IdleClientTimeout = Duration.Seconds(300),
+                RequireTLS = true,
+                VpcSubnets = new SubnetSelection
+                {
+                    Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 }
+                },
+                DebugLogging = true
+            });
+
         }
     }
 }
