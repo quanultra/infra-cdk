@@ -1,5 +1,8 @@
+using System.Linq;
 using Amazon.CDK;
+using Amazon.CDK.AWS.ApplicationAutoScaling;
 using Amazon.CDK.AWS.EC2;
+using Amazon.CDK.AWS.ECS;
 using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Constructs;
 
@@ -164,6 +167,68 @@ namespace InfraCdk
                 Description = "Security group for RDS instance"
             });
             rdsSecurityGroup.AddIngressRule(ecsSecurityGroup, Port.Tcp(3306), "Allow MySQL traffic from ECS tasks");
+
+            // Tạo ECS Cluster và Fargate Service sẽ được triển khai trong private subnet, nên gắn security group của ECS vào private subnet
+            var ecsCluster = new Cluster(this, "ECSCluster", new ClusterProps
+            {
+                Vpc = vpc,
+                ClusterName = "ECSCluster"
+            });
+
+            // Task Definition cho Fargate Service
+            var taskDefinition = new FargateTaskDefinition(this, "FargateTaskDef", new FargateTaskDefinitionProps
+            {
+                Cpu = 256,
+                MemoryLimitMiB = 512
+            });
+            taskDefinition.AddContainer("AppContainer", new ContainerDefinitionOptions
+            {
+                Image = ContainerImage.FromRegistry("amazon/amazon-ecs-sample"),
+                PortMappings = new[] { new PortMapping { ContainerPort = 80 } }
+            });
+
+            // Tạo Fargate Service
+            var fargateService = new FargateService(this, "FargateService", new FargateServiceProps
+            {
+                Cluster = ecsCluster,
+                ServiceName = "MyFargateService",
+                TaskDefinition = taskDefinition,
+                AssignPublicIp = false,
+                DesiredCount = 2,
+                SecurityGroups = new[] { ecsSecurityGroup },
+                VpcSubnets = new SubnetSelection
+                {
+                    Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 }
+                }
+            });
+
+            // Attach the Fargate Service to the ALB target group
+            var targetGroup = new ApplicationTargetGroup(this, "FargateTargetGroup", new ApplicationTargetGroupProps
+            {
+                Vpc = vpc,
+                Port = 80,
+                Protocol = ApplicationProtocol.HTTP,
+                TargetType = TargetType.IP
+            });
+
+            fargateService.AttachToApplicationTargetGroup(targetGroup);
+            listener.AddTargetGroups("DefaultTargetGroup", new AddApplicationTargetGroupsProps
+            {
+                TargetGroups = new[] { targetGroup }
+            });
+
+            // Auto Scaling cho Fargate Service
+            var scaling = fargateService.AutoScaleTaskCount(new EnableScalingProps
+            {
+                MinCapacity = 2,
+                MaxCapacity = 8
+            });
+            scaling.ScaleOnCpuUtilization("CpuScaling", new CpuUtilizationScalingProps
+            {
+                TargetUtilizationPercent = 50,
+                ScaleInCooldown = Duration.Seconds(60),
+                ScaleOutCooldown = Duration.Seconds(60)
+            });
         }
     }
 }
