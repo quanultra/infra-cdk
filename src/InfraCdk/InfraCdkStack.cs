@@ -12,7 +12,7 @@ namespace InfraCdk
     {
         internal InfraCdkStack(Construct scope, string id, IStackProps props = null) : base(scope, id, props)
         {
-            // Tạo VPC không tạo subnet tự động
+            // Tạo VPC (Virtual Private Cloud) với CIDR 10.0.0.0/16, không tạo subnet tự động, không tạo NAT Gateway tự động
             var vpc = new Vpc(this, "MyVPC", new VpcProps
             {
                 IpAddresses = IpAddresses.Cidr("10.0.0.0/16"),
@@ -21,7 +21,7 @@ namespace InfraCdk
                 NatGateways = 0 // Không tạo NAT Gateway tự động
             });
 
-            // Tạo 2 public subnet thủ công trên 2 AZ
+            // Tạo 2 public subnet thủ công trên 2 AZ (mỗi subnet ở một Availability Zone, cho phép gán public IP khi launch EC2)
             var publicSubnet1 = new Subnet(this, "PublicSubnet1", new SubnetProps
             {
                 VpcId = vpc.VpcId,
@@ -37,7 +37,7 @@ namespace InfraCdk
                 MapPublicIpOnLaunch = true
             });
 
-            // Tạo Internet Gateway thủ công
+            // Tạo Internet Gateway (IGW) thủ công và gắn vào VPC để các public subnet có thể truy cập Internet
             var igw = new CfnInternetGateway(this, "MyIGW");
             new CfnVPCGatewayAttachment(this, "IGWAttachment", new CfnVPCGatewayAttachmentProps
             {
@@ -45,7 +45,7 @@ namespace InfraCdk
                 InternetGatewayId = igw.Ref
             });
 
-            // Tạo Route Table cho public subnet
+            // Tạo Route Table cho public subnet, thêm route mặc định ra Internet và gắn vào từng public subnet
             var publicRouteTable = new CfnRouteTable(this, "PublicRouteTable", new CfnRouteTableProps
             {
                 VpcId = vpc.VpcId
@@ -69,7 +69,7 @@ namespace InfraCdk
                 RouteTableId = publicRouteTable.Ref
             });
 
-            // Tạo 2 private subnet thủ công trên 2 AZs.
+            // Tạo 2 private subnet thủ công trên 2 AZs (mỗi subnet ở một Availability Zone, không gán public IP)
             var privateSubnet1 = new Subnet(this, "PrivateSubnet1", new SubnetProps
             {
                 VpcId = vpc.VpcId,
@@ -85,20 +85,20 @@ namespace InfraCdk
                 MapPublicIpOnLaunch = false
             });
 
-            // Tạo Elastic IP cho Nat Gateway
+            // Tạo Elastic IP (EIP) để gán cho NAT Gateway (giúp private subnet truy cập Internet)
             var natEip = new CfnEIP(this, "NatEIP", new CfnEIPProps
             {
                 Domain = "vpc"
             });
 
-            // Tạo Nat Gateway thủ công trong public subnet 1
+            // Tạo NAT Gateway thủ công trong public subnet 1, dùng EIP ở trên
             var natGateway = new CfnNatGateway(this, "NatGateway", new CfnNatGatewayProps
             {
                 SubnetId = publicSubnet1.SubnetId,
                 AllocationId = natEip.AttrAllocationId
             });
 
-            // Route mặc định của private subnet ra Internet qua Nat Gateway
+            // Tạo Route Table cho private subnet, thêm route mặc định ra Internet qua NAT Gateway và gắn vào từng private subnet
             var privateRouteTable = new CfnRouteTable(this, "PrivateRouteTable", new CfnRouteTableProps
             {
                 VpcId = vpc.VpcId
@@ -121,7 +121,7 @@ namespace InfraCdk
                 RouteTableId = privateRouteTable.Ref
             });
 
-            // Security Group cho ALB
+            // Tạo Security Group cho Application Load Balancer (ALB), cho phép HTTP từ mọi nơi và outbound HTTPS
             var albSecurityGroup = new SecurityGroup(this, "ALBSecurityGroup", new SecurityGroupProps
             {
                 Vpc = vpc,
@@ -131,7 +131,7 @@ namespace InfraCdk
             albSecurityGroup.AddIngressRule(Peer.AnyIpv4(), Port.Tcp(80), "Allow HTTP traffic from anywhere");
             albSecurityGroup.AddEgressRule(Peer.AnyIpv4(), Port.Tcp(443), "Allow HTTPS traffic to anywhere");
 
-            // ALB sẽ được triển khai trong public subnet, nên gắn security group của ALB vào public subnet
+            // Tạo Application Load Balancer (ALB) trong public subnet, gắn security group ở trên, tạo listener HTTP
             var alb = new ApplicationLoadBalancer(this, "MyALB", new ApplicationLoadBalancerProps
             {
                 Vpc = vpc,
@@ -150,7 +150,7 @@ namespace InfraCdk
                 Open = true
             });
 
-            // Security Group cho ECS Fargate
+            // Tạo Security Group cho ECS Fargate, chỉ cho phép nhận HTTP từ ALB
             var ecsSecurityGroup = new SecurityGroup(this, "ECSSecurityGroup", new SecurityGroupProps
             {
                 Vpc = vpc,
@@ -159,7 +159,7 @@ namespace InfraCdk
             });
             ecsSecurityGroup.AddIngressRule(albSecurityGroup, Port.Tcp(80), "Allow HTTP traffic from ALB");
 
-            // Security Group cho RDS
+            // Tạo Security Group cho RDS, chỉ cho phép nhận MySQL traffic từ ECS Fargate
             var rdsSecurityGroup = new SecurityGroup(this, "RDSSecurityGroup", new SecurityGroupProps
             {
                 Vpc = vpc,
@@ -168,14 +168,14 @@ namespace InfraCdk
             });
             rdsSecurityGroup.AddIngressRule(ecsSecurityGroup, Port.Tcp(3306), "Allow MySQL traffic from ECS tasks");
 
-            // Tạo ECS Cluster và Fargate Service sẽ được triển khai trong private subnet, nên gắn security group của ECS vào private subnet
+            // Tạo ECS Cluster để quản lý các Fargate Service, gắn vào VPC
             var ecsCluster = new Cluster(this, "ECSCluster", new ClusterProps
             {
                 Vpc = vpc,
                 ClusterName = "ECSCluster"
             });
 
-            // Task Definition cho Fargate Service
+            // Định nghĩa Task cho Fargate Service (chỉ định CPU, RAM, image, port mapping cho container)
             var taskDefinition = new FargateTaskDefinition(this, "FargateTaskDef", new FargateTaskDefinitionProps
             {
                 Cpu = 256,
@@ -187,7 +187,7 @@ namespace InfraCdk
                 PortMappings = new[] { new PortMapping { ContainerPort = 80 } }
             });
 
-            // Tạo Fargate Service
+            // Tạo Fargate Service chạy trong private subnet, gắn security group, chỉ định số lượng task mong muốn
             var fargateService = new FargateService(this, "FargateService", new FargateServiceProps
             {
                 Cluster = ecsCluster,
@@ -202,7 +202,7 @@ namespace InfraCdk
                 }
             });
 
-            // Attach the Fargate Service to the ALB target group
+            // Tạo Target Group cho ALB, gắn Fargate Service vào target group để nhận traffic từ ALB
             var targetGroup = new ApplicationTargetGroup(this, "FargateTargetGroup", new ApplicationTargetGroupProps
             {
                 Vpc = vpc,
@@ -217,7 +217,7 @@ namespace InfraCdk
                 TargetGroups = new[] { targetGroup }
             });
 
-            // Auto Scaling cho Fargate Service
+            // Thiết lập Auto Scaling cho Fargate Service dựa trên CPU utilization (tự động scale in/out task)
             var scaling = fargateService.AutoScaleTaskCount(new EnableScalingProps
             {
                 MinCapacity = 2,
