@@ -366,7 +366,7 @@ namespace InfraCdk
                         Priority = 1,
                         OverrideAction = new CfnWebACL.OverrideActionProperty
                         {
-                            None = new object()
+                            None = null
                         },
                         Statement = new CfnWebACL.StatementProperty
                         {
