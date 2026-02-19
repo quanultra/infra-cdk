@@ -306,6 +306,35 @@ namespace InfraCdk
                 DebugLogging = true
             });
 
+            // Xuất output endpoint của RDS Proxy để Fargate Service có thể kết nối đến database qua proxy
+            new CfnOutput(this, "RDSProxyEndpoint", new CfnOutputProps
+            {
+                Value = rdsProxy.Endpoint,
+                Description = "Endpoint for RDS Proxy to connect to Aurora cluster",
+                ExportName = "RDSProxyEndpoint"
+            });
+
+            // S3 bucket để lưu trữ tài nguyên tĩnh (nếu cần thiết), có thể gắn vào Fargate Service để ứng dụng sử dụng
+            var staticBucket = new Amazon.CDK.AWS.S3.Bucket(this, "StaticBucket", new Amazon.CDK.AWS.S3.BucketProps
+            {
+                BucketName = "my-static-resources-bucket",
+                Versioned = true,
+                RemovalPolicy = RemovalPolicy.DESTROY // Chỉ dùng cho môi trường dev/test
+            });
+
+            // VPC Gateway Endpoint cho S3 để Fargate Service có thể truy cập S3 mà không cần đi qua Internet (tăng bảo mật và hiệu suất)
+            vpc.AddGatewayEndpoint("S3Endpoint", new GatewayVpcEndpointOptions
+            {
+                Service = GatewayVpcEndpointAwsService.S3,
+                Subnets = new[]
+                {
+                    new SubnetSelection
+                    {
+                        Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 }
+                    }
+                }
+            });
+
         }
     }
 }
