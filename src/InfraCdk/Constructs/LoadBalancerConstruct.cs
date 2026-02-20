@@ -4,7 +4,6 @@ using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Amazon.CDK.AWS.Route53;
 using Amazon.CDK.AWS.S3;
 using Amazon.CDK.AWS.SecretsManager;
-using Amazon.CDK.AWS.WAFv2;
 using Constructs;
 
 namespace InfraCdk.Constructs
@@ -23,7 +22,8 @@ namespace InfraCdk.Constructs
 
     /// <summary>
     /// Triển khai ALB, ACM Certificate, HTTP→HTTPS redirect listener,
-    /// HTTPS listener với CloudFront header authentication, và WAF (REGIONAL).
+    /// và HTTPS listener với CloudFront header authentication.
+    /// WAF đã được chuyển sang WafStack (CLOUDFRONT scope, us-east-1).
     /// </summary>
     public class LoadBalancerConstruct : Construct
     {
@@ -139,65 +139,6 @@ namespace InfraCdk.Constructs
                     {
                         ListenerCondition.HttpHeader(CustomHeaderName, new[] { CustomHeaderValue }),
                     },
-                }
-            );
-
-            // --- WAF — bảo vệ ALB khỏi tấn công web phổ biến ---
-            var webAcl = new CfnWebACL(
-                this,
-                "WebACL",
-                new CfnWebACLProps
-                {
-                    DefaultAction = new CfnWebACL.DefaultActionProperty
-                    {
-                        Allow = new CfnWebACL.AllowActionProperty(),
-                    },
-                    Scope = "REGIONAL",
-                    VisibilityConfig = new CfnWebACL.VisibilityConfigProperty
-                    {
-                        SampledRequestsEnabled = true,
-                        CloudWatchMetricsEnabled = true,
-                        MetricName = "WebACLMetric",
-                    },
-                    Rules = new object[]
-                    {
-                        new CfnWebACL.RuleProperty
-                        {
-                            Name = "AWS-AWSManagedRulesCommonRuleSet",
-                            Priority = 1,
-                            OverrideAction = new CfnWebACL.OverrideActionProperty
-                            {
-                                None = new object(),
-                            },
-                            Statement = new CfnWebACL.StatementProperty
-                            {
-                                ManagedRuleGroupStatement =
-                                    new CfnWebACL.ManagedRuleGroupStatementProperty
-                                    {
-                                        VendorName = "AWS",
-                                        Name = "AWSManagedRulesCommonRuleSet",
-                                    },
-                            },
-                            VisibilityConfig = new CfnWebACL.VisibilityConfigProperty
-                            {
-                                SampledRequestsEnabled = true,
-                                CloudWatchMetricsEnabled = true,
-                                MetricName = "AWSManagedRulesCommonRuleSetMetric",
-                            },
-                        },
-                        // TODO: Thêm AWSManagedRulesKnownBadInputsRuleSet và AWSManagedRulesAmazonIpReputationList
-                    },
-                }
-            );
-
-            // Gắn WAF vào ALB
-            new CfnWebACLAssociation(
-                this,
-                "WebACLAssociation",
-                new CfnWebACLAssociationProps
-                {
-                    ResourceArn = Alb.LoadBalancerArn,
-                    WebAclArn = webAcl.AttrArn,
                 }
             );
         }

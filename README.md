@@ -1,107 +1,304 @@
 # AWS Infrastructure CDK Project
 
-This project defines a comprehensive, production-ready AWS infrastructure using AWS Cloud Development Kit (CDK) with C# (.NET 8.0).
+Project này định nghĩa infrastructure AWS production-ready sử dụng AWS CDK với C# (.NET 8.0).
 
-## 🏗️ Architecture Overview
+---
 
-The infrastructure includes the following resources, designed for high availability, security, and scalability:
+## 🏗️ Kiến trúc tổng quan
 
-### 1. Networking (VPC)
+```text
+Internet
+   │
+   ▼
+[WAF – CloudFront Edge]        ← WafStack (us-east-1), lọc attack trước khi vào VPC
+   │  3 managed rule groups
+   ▼
+CloudFront Distribution        ← Cache, HTTPS, gắn custom header bí mật
+   │  HTTPS + X-Origin-Verify header
+   ▼
+Application Load Balancer      ← Public Subnet, kiểm tra X-Origin-Verify header
+   │  HTTP 80 → redirect HTTPS 443
+   ▼
+ECS Fargate Service            ← Private Subnet, Auto Scaling 2–8 tasks
+   │
+   ▼
+RDS Proxy                      ← Connection pooling, TLS bắt buộc
+   │
+   ▼
+Aurora MySQL Cluster           ← Private Subnet, 1 Writer + 1 Reader
+```
 
-* **VPC**: Custom VPC with CIDR `10.0.0.0/16`.
-* **Subnets**:
-  * 2 Public Subnets (for Load Balancer, NAT Gateway).
-  * 2 Private Subnets (for ECS Fargate, RDS).
-* **Gateways**: Internet Gateway (IGW) and NAT Gateway (with Elastic IP).
-* **Endpoints**: VPC Gateway Endpoint for S3 (secure internal access).
+---
 
-### 2. Computing (Compute)
+## 📦 Cấu trúc project
 
-* **ECS Fargate**: Serverless container orchestration.
-  * Cluster: `ECSCluster`.
-  * Service: Runs in Private Subnets with Auto Scaling (2-8 tasks based on CPU).
-  * Task Definition: CPU 256, Memory 512MiB.
+```text
+src/InfraCdk/
+├── Program.cs                      # Entry point — khởi tạo WafStack & InfraCdkStack
+├── WafStack.cs                     # WAF riêng (CLOUDFRONT scope, us-east-1)
+├── InfraCdkStack.cs                # Main stack — orchestrate tất cả Constructs
+└── Constructs/
+    ├── NetworkingConstruct.cs      # VPC, Subnets, IGW, Route Tables, VPC Endpoints
+    ├── SecurityGroupsConstruct.cs  # ALB / ECS / RDS Security Groups
+    ├── StorageConstruct.cs         # S3 Buckets + Lifecycle Rules
+    ├── EcsConstruct.cs             # ECS Cluster, Fargate, Auto Scaling
+    ├── DatabaseConstruct.cs        # Aurora MySQL, RDS Proxy, Password Rotation
+    ├── LoadBalancerConstruct.cs    # ALB, ACM Certificate, Listeners
+    └── CloudFrontConstruct.cs      # CloudFront Distribution + Route53
+```
 
-### 3. Database (Storage)
+---
 
-* **Amazon Aurora MySQL**:
-  * Engine: Aurora MySQL 3.04.0.
-  * Topology: 1 Writer + 1 Reader instance in Private Subnets.
-* **RDS Proxy**:
-  * Manages connection pooling for better performance and scalability.
-  * Secure access via IAM Role.
+## 🔒 Security
 
-### 4. Load Balancing & Delivery (CDN)
+| Tầng | Cơ chế bảo vệ |
+|------|--------------|
+| **WAF (CloudFront Edge)** | 3 managed rule groups: CommonRuleSet, IpReputationList, KnownBadInputs |
+| **CloudFront → ALB** | Custom header `X-Origin-Verify` — ALB từ chối request không có header |
+| **ALB → ECS** | Security Group — chỉ nhận traffic từ ALB SG |
+| **ECS → RDS** | Security Group — chỉ nhận MySQL từ ECS SG |
+| **Database** | Credentials lưu Secrets Manager, tự xoay vòng mỗi 30 ngày |
+| **RDS Proxy** | RequireTLS = true |
 
-* **Application Load Balancer (ALB)**:
-  * Public facing, listens on HTTP (80) and HTTPS (443).
-  * Redirects HTTP to HTTPS.
-* **Amazon CloudFront (CDN)**:
-  * Caches static content at Edge locations.
-  * Secure origin connection (HTTPS) to ALB.
-* **Route 53 & ACM**:
-  * Hosted Zone management.
-  * SSL/TLS Certificate via AWS Certificate Manager (ACM).
-  * DNS Alias records pointing to CloudFront/ALB.
+---
 
-### 5. Security (Security)
+## 💰 Tối ưu chi phí
 
-* **AWS WAF (Web Application Firewall)**:
-  * Attached to ALB to protect against common web exploits (AWSManagedRulesCommonRuleSet).
-* **Security Groups**:
-  * Strict inbound/outbound rules (ALB -> ECS -> RDS).
+- **Không có NAT Gateway** (~$32/tháng) — thay bằng VPC Endpoints
+- **ECS tắt ban đêm** — schedule scale-down 22:00 VN (15:00 UTC), bật lại 07:00 VN
+- **S3 Lifecycle Rules** — ALB logs tự động chuyển S3-IA → Glacier → xóa sau 1 năm
 
-### 6. Monitoring & Operations (Ops)
-
-* **CloudWatch Logs**: Centralized logging for ECS Fargate.
-* **CloudWatch Alarms**:
-  * Alert on High CPU (>80%).
-  * Alert on 5XX Errors.
-* **SNS Topic**: Sends email notifications for alarms.
+---
 
 ## 🚀 Build & Deploy
 
-### Prerequisites
+### Yêu cầu
 
-* AWS CLI configured with appropriate credentials.
-* .NET 8.0 SDK installed.
-* Node.js & AWS CDK Toolkit installed (`npm install -g aws-cdk`).
+- AWS CLI đã cấu hình credentials
+- .NET 8.0 SDK
+- Node.js & AWS CDK Toolkit: `npm install -g aws-cdk`
+- Route 53 Hosted Zone cho domain đang dùng
 
-### 0. Configure AWS Credentials
-
-Before running the project, you must configure your AWS credentials so the CDK can query your account (e.g., for Route 53 lookups).
+### 0. Cấu hình AWS Credentials
 
 ```bash
 aws configure
 ```
 
-You will be prompted to enter the following information:
+Nhập thông tin:
 
-* **AWS Access Key ID**: Your IAM user access key.
-* **AWS Secret Access Key**: Your IAM user secret key.
-* **Default region name**: The region where your Route 53 Hosted Zone is located (e.g., `ap-southeast-1` or `us-east-1`).
-* **Default output format**: `json` (optional).
+- **AWS Access Key ID**
+- **AWS Secret Access Key**
+- **Default region**: region chính của bạn (VD: `ap-northeast-1`)
+- **Default output format**: `json`
 
-**Note:** Ensure your IAM user has sufficient permissions (e.g., `AdministratorAccess` or specific policies for EC2, ECS, RDS, Route53, etc.).
+Thiết lập biến môi trường (cần cho CDK):
+
+```bash
+export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+export CDK_DEFAULT_REGION=$(aws configure get region)
+```
+
+### 1. Build
 
 ```bash
 dotnet restore src/InfraCdk.sln
 dotnet build src/InfraCdk.sln
 ```
 
-### 2. Synthesize CloudFormation template
+### 2. Bootstrap CDK (chỉ cần chạy lần đầu)
+
+CloudFront WAF bắt buộc ở `us-east-1`, nên cần bootstrap **cả 2 region**:
+
+```bash
+# Bootstrap region chính (VD: ap-northeast-1)
+cdk bootstrap aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION
+
+# Bootstrap us-east-1 (bắt buộc cho WafStack)
+cdk bootstrap aws://$CDK_DEFAULT_ACCOUNT/us-east-1
+```
+
+### 3. Synthesize CloudFormation templates
 
 ```bash
 cdk synth
 ```
 
-### 3. Deploy to AWS
+### 4. Deploy
+
+> ⚠️ **Quan trọng**: `WafStack` **phải deploy trước** `InfraCdkStack` vì InfraCdkStack cần WAF ARN từ WafStack.
 
 ```bash
-cdk deploy
+# Bước 1: Deploy WAF Stack (luôn ở us-east-1)
+cdk deploy WafStack
+
+# Bước 2: Deploy Main Stack (region chính)
+cdk deploy InfraCdkStack
 ```
 
-### 4. Maintenance
+Hoặc deploy cả hai cùng lúc (CDK tự xử lý thứ tự dependency):
 
-* `cdk diff`: Compare deployed stack with current state.
-* `cdk destroy`: Delete the deployed stack from AWS.
+```bash
+cdk deploy --all
+```
+
+### 5. Xem trạng thái và so sánh thay đổi
+
+```bash
+# Xem sự khác biệt trước khi deploy
+cdk diff WafStack
+cdk diff InfraCdkStack
+
+# Xem tất cả stacks
+cdk list
+```
+
+### 6. Xóa infrastructure
+
+> ⚠️ **Quan trọng**: Xóa `InfraCdkStack` trước, sau đó mới xóa `WafStack`.
+
+```bash
+# Bước 1: Xóa Main Stack trước
+cdk destroy InfraCdkStack
+
+# Bước 2: Xóa WAF Stack sau
+cdk destroy WafStack
+```
+
+---
+
+## ⚙️ Biến môi trường & Cấu hình
+
+| Biến | Mô tả | Ví dụ |
+|------|-------|--------|
+| `CDK_DEFAULT_ACCOUNT` | AWS Account ID | `123456789012` |
+| `CDK_DEFAULT_REGION` | Region chính deploy | `ap-northeast-1` |
+
+Domain name được cấu hình trong `InfraCdkStack.cs`:
+
+```csharp
+const string domainName = "example.com"; // ← Đổi thành domain của bạn
+```
+
+---
+
+## 📝 Ghi chú vận hành
+
+| Việc cần làm | Lệnh |
+|---|---|
+| Xem ECS logs | AWS Console → CloudWatch → Log Groups → `/ecs/fargate-service-logs` |
+| Xem WAF metrics | AWS Console → WAF & Shield → WebACLs → `CloudFrontWebACL` |
+| Xem ALB access logs | AWS Console → S3 → `ALBLogBucket` |
+| Rotate DB password ngay | AWS Console → Secrets Manager → chọn secret → Rotate immediately |
+
+---
+
+## 🗄️ Kết nối DB từ máy local (SSM Port Forwarding)
+
+Aurora nằm trong Private Subnet, không có public endpoint. Để kết nối từ máy local,
+dùng **Bastion Host qua SSM Session Manager** — không cần SSH key, không cần mở port 22.
+
+```text
+Local Machine ──→ AWS SSM ──→ DBBastionHost (EC2) ──→ RDS Proxy ──→ Aurora MySQL
+  :13306 (local)                 (Public Subnet)          :3306
+```
+
+### Bước 1: Cài Session Manager Plugin
+
+```bash
+# macOS
+brew install session-manager-plugin
+
+# Linux
+curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o plugin.deb
+sudo dpkg -i plugin.deb
+```
+
+### Bước 2: Start Bastion Instance (nếu đang STOPPED)
+
+```bash
+# Lấy Instance ID từ CloudFormation Output
+INSTANCE_ID=$(aws cloudformation describe-stacks \
+  --stack-name InfraCdkStack \
+  --query "Stacks[0].Outputs[?OutputKey=='BastionInstanceId'].OutputValue" \
+  --output text)
+
+echo "Bastion Instance ID: $INSTANCE_ID"
+
+# Start instance
+aws ec2 start-instances --instance-ids $INSTANCE_ID
+
+# Chờ instance ready (~30 giây)
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+```
+
+### Bước 3: Lấy RDS Proxy Endpoint
+
+```bash
+RDS_PROXY_ENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name InfraCdkStack \
+  --query "Stacks[0].Outputs[?OutputKey=='RDSProxyEndpoint'].OutputValue" \
+  --output text)
+
+echo "RDS Proxy Endpoint: $RDS_PROXY_ENDPOINT"
+```
+
+### Bước 4: Tạo SSM Port Forwarding Tunnel
+
+Lệnh này tạo tunnel: `localhost:13306` → `RDS Proxy:3306` qua Bastion.
+
+```bash
+aws ssm start-session \
+  --target $INSTANCE_ID \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters "{
+    \"host\": [\"$RDS_PROXY_ENDPOINT\"],
+    \"portNumber\": [\"3306\"],
+    \"localPortNumber\": [\"13306\"]
+  }"
+```
+
+> Terminal này sẽ giữ kết nối tunnel. **Mở terminal mới** để thực hiện bước tiếp theo.
+
+### Bước 5: Lấy DB Password từ Secrets Manager
+
+```bash
+# Lấy Secret ARN
+SECRET_ARN=$(aws secretsmanager list-secrets \
+  --query "SecretList[?contains(Name, 'MyAuroraCluster')].ARN" \
+  --output text)
+
+# Lấy password
+DB_PASSWORD=$(aws secretsmanager get-secret-value \
+  --secret-id $SECRET_ARN \
+  --query SecretString \
+  --output text | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+
+echo "DB Password: $DB_PASSWORD"
+```
+
+### Bước 6: Kết nối MySQL
+
+```bash
+# Kết nối qua tunnel local port 13306
+mysql -h 127.0.0.1 -P 13306 -u sysadmin -p"$DB_PASSWORD" mydatabase
+```
+
+Hoặc dùng MySQL Workbench / DBeaver:
+
+| Trường | Giá trị |
+|--------|---------|
+| **Host** | `127.0.0.1` |
+| **Port** | `13306` |
+| **User** | `sysadmin` |
+| **Password** | (lấy từ Bước 5) |
+| **Database** | `mydatabase` |
+
+### Bước 7: STOP Bastion sau khi dùng xong (tiết kiệm chi phí)
+
+> ⚠️ `t3.micro` tốn ~$0.013/giờ → ~$9.4/tháng nếu để chạy liên tục.
+> **Hãy STOP instance ngay sau khi không dùng nữa.**
+
+```bash
+aws ec2 stop-instances --instance-ids $INSTANCE_ID
+```

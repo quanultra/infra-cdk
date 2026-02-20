@@ -17,13 +17,18 @@ namespace InfraCdk.Constructs
         public IHostedZone HostedZone { get; set; }
         public string CustomHeaderName { get; set; }
         public string CustomHeaderValue { get; set; }
+
+        /// <summary>
+        /// ARN của CloudFront WAF (WafStack.WebAclArn).
+        /// WAF phải có Scope = "CLOUDFRONT" và được deploy tại us-east-1.
+        /// </summary>
+        public string WafArn { get; set; }
     }
 
     /// <summary>
-    /// Triển khai CloudFront Distribution phía trước ALB.
-    /// CloudFront gắn custom header bí mật vào mọi request để ALB
-    /// có thể xác minh traffic đến từ CloudFront, không phải từ Internet trực tiếp.
-    /// Tạo Route53 A Record trỏ domain về CloudFront.
+    /// Triển khai CloudFront Distribution phía trước ALB, gắn WAF (từ WafStack),
+    /// và tạo Route53 A Record cho apex domain và www subdomain.
+    /// WAF được lọc tại CloudFront edge trước khi traffic vào VPC.
     /// </summary>
     public class CloudFrontConstruct : Construct
     {
@@ -58,6 +63,8 @@ namespace InfraCdk.Constructs
                     },
                     DomainNames = new[] { props.DomainName, $"www.{props.DomainName}" },
                     Certificate = props.Certificate,
+                    // WAF được lọc tại CloudFront edge (trước khi vào VPC)
+                    WebAclId = props.WafArn,
                 }
             );
 
