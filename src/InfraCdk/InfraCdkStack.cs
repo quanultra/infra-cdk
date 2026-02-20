@@ -471,6 +471,10 @@ namespace InfraCdk
                 }
             );
 
+            // 6. Cấu hình Database User & Password Rotation
+            // Định nghĩa Credentials tự sinh (Username: sysadmin) và lưu vào Secrets Manager
+            var dbCredentials = Credentials.FromGeneratedSecret("sysadmin");
+
             // Tạo Aurora MySQL cluster trong private subnet, gắn security group, chỉ định thông số cơ bản
             var auroraCluster = new DatabaseCluster(
                 this,
@@ -483,6 +487,7 @@ namespace InfraCdk
                             Version = AuroraMysqlEngineVersion.VER_3_04_0,
                         }
                     ),
+                    Credentials = dbCredentials, // Sử dụng credentials vừa tạo
                     Writer = ClusterInstance.Provisioned(
                         "writer",
                         new ProvisionedClusterInstanceProps
@@ -517,6 +522,20 @@ namespace InfraCdk
                     SubnetGroup = rdsSubnetGroup,
                     DefaultDatabaseName = "mydatabase",
                     RemovalPolicy = RemovalPolicy.DESTROY, // Chỉ dùng cho môi trường dev/test
+                }
+            );
+
+            // Cấu hình tự động xoay vòng mật khẩu (Password Rotation) mỗi 30 ngày
+            auroraCluster.AddRotationSingleUser(
+                "Rotation",
+                new RotationSingleUserOptions
+                {
+                    AutomaticallyAfter = Duration.Days(30),
+                    // Lambda function thực hiện rotate cần nằm trong cùng VPC để connect DB
+                    VpcSubnets = new SubnetSelection
+                    {
+                        Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 },
+                    },
                 }
             );
 
