@@ -566,7 +566,10 @@ namespace InfraCdk
                 new BaseApplicationListenerProps
                 {
                     Port = 443,
-                    Certificates = new[] { certificate },
+                    Certificates = new[]
+                    {
+                        ListenerCertificate.FromCertificateManager(certificate),
+                    },
                     Open = true,
                     DefaultTargetGroups = new[] { targetGroup },
                 }
@@ -609,7 +612,7 @@ namespace InfraCdk
                         AllowedMethods = AllowedMethods.ALLOW_ALL,
                         Compress = true,
                     },
-                    Aliases = new[] { domainName, $"www.{domainName}" },
+                    DomainNames = new[] { domainName, $"www.{domainName}" },
                     Certificate = certificate,
                 }
             );
