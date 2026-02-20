@@ -128,36 +128,92 @@ namespace InfraCdk
                 }
             );
 
-            // Tạo Elastic IP (EIP) để gán cho NAT Gateway (giúp private subnet truy cập Internet)
-            var natEip = new CfnEIP(this, "NatEIP", new CfnEIPProps { Domain = "vpc" });
+            // --------------------------------------------------------------------------------
+            // TỐI ƯU CHI PHÍ: Sử dụng VPC Endpoints thay vì NAT Gateway (~$30/tháng/NAT)
+            // NAT Gateway đã được loại bỏ. Private Subnets giờ đây hoàn toàn cô lập (Isolated).
+            // --------------------------------------------------------------------------------
 
-            // Tạo NAT Gateway thủ công trong public subnet 1, dùng EIP ở trên
-            var natGateway = new CfnNatGateway(
+            // Security Group cho VPC Endpoints (cho phép HTTPS 443 từ trong VPC)
+            var vpcEndpointSG = new SecurityGroup(
                 this,
-                "NatGateway",
-                new CfnNatGatewayProps
+                "VpcEndpointSG",
+                new SecurityGroupProps
                 {
-                    SubnetId = publicSubnet1.SubnetId,
-                    AllocationId = natEip.AttrAllocationId,
+                    Vpc = vpc,
+                    AllowAllOutbound = true,
+                    Description = "Security Group for VPC Endpoints",
+                }
+            );
+            vpcEndpointSG.AddIngressRule(
+                Peer.Ipv4(vpc.VpcCidrBlock),
+                Port.Tcp(443),
+                "Allow HTTPS from VPC"
+            );
+
+            // 1. ECR Docker Endpoint (để pull image layers)
+            vpc.AddInterfaceEndpoint(
+                "EcrDockerEndpoint",
+                new InterfaceVpcEndpointOptions
+                {
+                    Service = InterfaceVpcEndpointAwsService.ECR_DOCKER,
+                    SecurityGroups = new[] { vpcEndpointSG },
+                    Subnets = new SubnetSelection
+                    {
+                        Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 },
+                    },
                 }
             );
 
-            // Tạo Route Table cho private subnet, thêm route mặc định ra Internet qua NAT Gateway và gắn vào từng private subnet
+            // 2. ECR API Endpoint (để xác thực và lấy thông tin image)
+            vpc.AddInterfaceEndpoint(
+                "EcrApiEndpoint",
+                new InterfaceVpcEndpointOptions
+                {
+                    Service = InterfaceVpcEndpointAwsService.ECR,
+                    SecurityGroups = new[] { vpcEndpointSG },
+                    Subnets = new SubnetSelection
+                    {
+                        Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 },
+                    },
+                }
+            );
+
+            // 3. CloudWatch Logs Endpoint (để đẩy log từ Fargate)
+            vpc.AddInterfaceEndpoint(
+                "LogsEndpoint",
+                new InterfaceVpcEndpointOptions
+                {
+                    Service = InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+                    SecurityGroups = new[] { vpcEndpointSG },
+                    Subnets = new SubnetSelection
+                    {
+                        Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 },
+                    },
+                }
+            );
+
+            // 4. Secrets Manager Endpoint (để lấy secret DB, Header authentication)
+            vpc.AddInterfaceEndpoint(
+                "SecretsManagerEndpoint",
+                new InterfaceVpcEndpointOptions
+                {
+                    Service = InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+                    SecurityGroups = new[] { vpcEndpointSG },
+                    Subnets = new SubnetSelection
+                    {
+                        Subnets = new ISubnet[] { privateSubnet1, privateSubnet2 },
+                    },
+                }
+            );
+
+            // Tạo Route Table riêng cho Private Subnet (Isolated - Không có Internet Route)
+            // Việc này đảm bảo các subnet này không vô tình sử dụng Main Route Table của VPC (nếu Main có IGW)
             var privateRouteTable = new CfnRouteTable(
                 this,
                 "PrivateRouteTable",
                 new CfnRouteTableProps { VpcId = vpc.VpcId }
             );
-            new CfnRoute(
-                this,
-                "PrivateDefaultRouteToNatGateway",
-                new CfnRouteProps
-                {
-                    RouteTableId = privateRouteTable.Ref,
-                    DestinationCidrBlock = "0.0.0.0/0",
-                    NatGatewayId = natGateway.Ref,
-                }
-            );
+
             new CfnSubnetRouteTableAssociation(
                 this,
                 "PrivateSubnet1RouteTableAssoc",
@@ -176,6 +232,9 @@ namespace InfraCdk
                     RouteTableId = privateRouteTable.Ref,
                 }
             );
+
+            // Lưu ý: Route Table cho Private Subnet không cần route 0.0.0.0/0 nữa vì không có NAT Gateway.
+            // Private Subnet chỉ có thể truy cập các dịch vụ AWS qua Endpoint hoặc local VPC resources.
 
             // Tạo Security Group cho Application Load Balancer (ALB), cho phép HTTP từ mọi nơi và outbound HTTPS
             var albSecurityGroup = new SecurityGroup(
@@ -302,7 +361,9 @@ namespace InfraCdk
                 "AppContainer",
                 new ContainerDefinitionOptions
                 {
-                    Image = ContainerImage.FromRegistry("amazon/amazon-ecs-sample"),
+                    // Sử dụng Docker Image từ Asset (CDK tự build và push lên ECR Private)
+                    // Điều này giúp deployment không phụ thuộc vào Internet (Docker Hub)
+                    Image = ContainerImage.FromAsset("src/InfraCdk/docker-app"),
                     PortMappings = new[] { new PortMapping { ContainerPort = 80 } },
                 }
             );
@@ -366,10 +427,10 @@ namespace InfraCdk
             // 3. Thêm HTTPS Listener vào ALB - Cấu hình bảo mật kiểm tra Header từ CloudFront
             var customHeaderName = "X-Origin-Verify";
             // Tạo Secret ngẫu nhiên trong AWS Secrets Manager thay vì hardcode
-            var headerSecret = new Secret(
+            var headerSecret = new Amazon.CDK.AWS.SecretsManager.Secret(
                 this,
                 "HeaderSecret",
-                new SecretProps
+                new Amazon.CDK.AWS.SecretsManager.SecretProps
                 {
                     GenerateSecretString = new SecretStringGenerator
                     {
@@ -413,7 +474,10 @@ namespace InfraCdk
                     Priority = 1,
                     Conditions = new[]
                     {
-                        ListenerCondition.HttpHeader(customHeaderName, new[] { customHeaderValue }),
+                        ListenerCondition.HttpHeader(
+                            customHeaderName,
+                            new string[] { customHeaderValue }
+                        ),
                     },
                 }
             );
@@ -484,6 +548,28 @@ namespace InfraCdk
                     TargetUtilizationPercent = 50,
                     ScaleInCooldown = Duration.Seconds(60),
                     ScaleOutCooldown = Duration.Seconds(60),
+                }
+            );
+
+            // Instance Scheduler: Tắt ECS vào ban đêm (22:00 VN = 15:00 UTC) để tiết kiệm chi phí Dev
+            scaling.ScaleOnSchedule(
+                "ScaleDownAtNight",
+                new ScalingSchedule
+                {
+                    Schedule = Schedule.Cron(new CronOptions { Hour = "15", Minute = "0" }),
+                    MinCapacity = 0,
+                    MaxCapacity = 0,
+                }
+            );
+
+            // Bật lại vào buổi sáng (07:00 VN = 00:00 UTC)
+            scaling.ScaleOnSchedule(
+                "ScaleUpInMorning",
+                new ScalingSchedule
+                {
+                    Schedule = Schedule.Cron(new CronOptions { Hour = "0", Minute = "0" }),
+                    MinCapacity = 2,
+                    MaxCapacity = 8,
                 }
             );
 
@@ -559,7 +645,6 @@ namespace InfraCdk
 
             // Cấu hình tự động xoay vòng mật khẩu (Password Rotation) mỗi 30 ngày
             auroraCluster.AddRotationSingleUser(
-                "Rotation",
                 new RotationSingleUserOptions
                 {
                     AutomaticallyAfter = Duration.Days(30),
