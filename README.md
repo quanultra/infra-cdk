@@ -66,6 +66,7 @@ The infrastructure includes the following resources, designed for high availabil
 * AWS CLI configured with appropriate credentials.
 * .NET 8.0 SDK installed.
 * Node.js & AWS CDK Toolkit installed (`npm install -g aws-cdk`).
+
 ### 0. Configure AWS Credentials
 
 Before running the project, you must configure your AWS credentials so the CDK can query your account (e.g., for Route 53 lookups).
@@ -75,10 +76,11 @@ aws configure
 ```
 
 You will be prompted to enter the following information:
-*   **AWS Access Key ID**: Your IAM user access key.
-*   **AWS Secret Access Key**: Your IAM user secret key.
-*   **Default region name**: The region where your Route 53 Hosted Zone is located (e.g., `ap-southeast-1` or `us-east-1`).
-*   **Default output format**: `json` (optional).
+
+* **AWS Access Key ID**: Your IAM user access key.
+* **AWS Secret Access Key**: Your IAM user secret key.
+* **Default region name**: The region where your Route 53 Hosted Zone is located (e.g., `ap-southeast-1` or `us-east-1`).
+* **Default output format**: `json` (optional).
 
 **Note:** Ensure your IAM user has sufficient permissions (e.g., `AdministratorAccess` or specific policies for EC2, ECS, RDS, Route53, etc.).
 

@@ -216,9 +216,22 @@ namespace InfraCdk
                 }
             );
             // Tạo listener cho ALB
+            // Tạo listener cho ALB - Redirect HTTP sang HTTPS
             var listener = alb.AddListener(
                 "Listener",
-                new BaseApplicationListenerProps { Port = 80, Open = true }
+                new BaseApplicationListenerProps
+                {
+                    Port = 80,
+                    Open = true,
+                    DefaultAction = ListenerAction.Redirect(
+                        new RedirectOptions
+                        {
+                            Protocol = "HTTPS",
+                            Port = "443",
+                            Permanent = true,
+                        }
+                    ),
+                }
             );
 
             // Tạo Security Group cho ECS Fargate, chỉ cho phép nhận HTTP từ ALB
@@ -310,12 +323,125 @@ namespace InfraCdk
             );
 
             fargateService.AttachToApplicationTargetGroup(targetGroup);
-            listener.AddTargetGroups(
-                "DefaultTargetGroup",
-                new AddApplicationTargetGroupsProps { TargetGroups = new[] { targetGroup } }
+
+            // --- HTTPS & Domain Configuration ---
+            const string domainName = "example.com";
+
+            // 1. Tìm Hosted Zone đã có trong Route 53
+            var hostedZone = HostedZone.FromLookup(
+                this,
+                "HostedZone",
+                new HostedZoneProviderProps { DomainName = domainName }
             );
 
-            // Thiết lập Auto Scaling cho Fargate Service dựa trên CPU utilization (tự động scale in/out task)
+            // 2. Tạo Certificate Manager (ACM) để quản lý SSL Certificate
+            var certificate = new Certificate(
+                this,
+                "SiteCertificate",
+                new CertificateProps
+                {
+                    DomainName = domainName,
+                    SubjectAlternativeNames = new[] { $"www.{domainName}" },
+                    Validation = CertificateValidation.FromDns(hostedZone),
+                }
+            );
+
+            // 3. Thêm HTTPS Listener vào ALB - Cấu hình bảo mật kiểm tra Header từ CloudFront
+            var customHeaderName = "X-Origin-Verify";
+            var customHeaderValue = "my-secret-random-string-123456"; // Nên dùng Secrets Manager trong thực tế
+
+            var httpsListener = alb.AddListener(
+                "HttpsListener",
+                new BaseApplicationListenerProps
+                {
+                    Port = 443,
+                    Certificates = new[]
+                    {
+                        ListenerCertificate.FromCertificateManager(certificate),
+                    },
+                    Open = true,
+                    // Mặc định từ chối tất cả request không có header hợp lệ (từ CloudFront)
+                    DefaultAction = ListenerAction.FixedResponse(
+                        403,
+                        new FixedResponseOptions
+                        {
+                            ContentType = "text/plain",
+                            MessageBody = "Access Denied",
+                        }
+                    ),
+                }
+            );
+
+            // Chỉ forward request vào Target Group nếu có Header bí mật từ CloudFront
+            httpsListener.AddTargetGroups(
+                "AppTarget",
+                new AddApplicationTargetGroupsProps
+                {
+                    TargetGroups = new[] { targetGroup },
+                    Priority = 1,
+                    Conditions = new[]
+                    {
+                        ListenerCondition.HttpHeader(customHeaderName, new[] { customHeaderValue }),
+                    },
+                }
+            );
+
+            // 4. Tạo bản ghi A Record (Alias) trỏ tên miền về ALB
+            // Lưu ý: Chúng ta sẽ trỏ về CloudFront ở bước 6, nên bước này có thể bỏ qua hoặc comment out nếu muốn đi vòng qua CloudFront
+            // new ARecord(this, "AliasRecord", new ARecordProps
+            // {
+            //     Zone = hostedZone,
+            //     Target = RecordTarget.FromAlias(new LoadBalancerTarget(alb)),
+            //     RecordName = domainName,
+            // });
+
+            // (Optional) Redirect HTTP sang HTTPS
+            // Chúng ta sẽ add một listener mới port 8888 tạm thời để tránh conflict với listener 80 cũ (sẽ xóa sau)
+            // Hoặc tốt hơn là không add ở đây mà sửa listener 80 cũ.
+
+            // 5. Tạo CloudFront Distribution
+            var distribution = new Distribution(
+                this,
+                "SiteDistribution",
+                new DistributionProps
+                {
+                    DefaultBehavior = new BehaviorOptions
+                    {
+                        Origin = new HttpOrigin(
+                            alb.LoadBalancerDnsName,
+                            new HttpOriginProps
+                            {
+                                ProtocolPolicy = OriginProtocolPolicy.HTTPS_ONLY,
+                                CustomHeaders = new System.Collections.Generic.Dictionary<
+                                    string,
+                                    string
+                                >
+                                {
+                                    { customHeaderName, customHeaderValue },
+                                },
+                            }
+                        ),
+                        ViewerProtocolPolicy = ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                        AllowedMethods = AllowedMethods.ALLOW_ALL,
+                        Compress = true,
+                    },
+                    DomainNames = new[] { domainName, $"www.{domainName}" },
+                    Certificate = certificate,
+                }
+            );
+
+            // 6. Cập nhật A Record trỏ tên miền về CloudFront
+            new ARecord(
+                this,
+                "AliasRecordCF",
+                new ARecordProps
+                {
+                    Zone = hostedZone,
+                    Target = RecordTarget.FromAlias(new CloudFrontTarget(distribution)),
+                    RecordName = domainName,
+                }
+            );
+
             var scaling = fargateService.AutoScaleTaskCount(
                 new EnableScalingProps { MinCapacity = 2, MaxCapacity = 8 }
             );
@@ -535,97 +661,6 @@ namespace InfraCdk
                 {
                     ResourceArn = alb.LoadBalancerArn,
                     WebAclArn = webAcl.AttrArn,
-                }
-            );
-
-            // --- HTTPS & Domain Configuration ---
-            const string domainName = "example.com";
-
-            // 1. Tìm Hosted Zone đã có trong Route 53
-            var hostedZone = HostedZone.FromLookup(
-                this,
-                "HostedZone",
-                new HostedZoneProviderProps { DomainName = domainName }
-            );
-
-            // 2. Tạo Certificate Manager (ACM) để quản lý SSL Certificate
-            var certificate = new Certificate(
-                this,
-                "SiteCertificate",
-                new CertificateProps
-                {
-                    DomainName = domainName,
-                    SubjectAlternativeNames = new[] { $"www.{domainName}" },
-                    Validation = CertificateValidation.FromDns(hostedZone),
-                }
-            );
-
-            // 3. Thêm HTTPS Listener vào ALB
-            alb.AddListener(
-                "HttpsListener",
-                new BaseApplicationListenerProps
-                {
-                    Port = 443,
-                    Certificates = new[]
-                    {
-                        ListenerCertificate.FromCertificateManager(certificate),
-                    },
-                    Open = true,
-                    DefaultTargetGroups = new[] { targetGroup },
-                }
-            );
-
-            // 4. Tạo bản ghi A Record (Alias) trỏ tên miền về ALB
-            new ARecord(
-                this,
-                "AliasRecord",
-                new ARecordProps
-                {
-                    Zone = hostedZone,
-                    Target = RecordTarget.FromAlias(new LoadBalancerTarget(alb)),
-                    RecordName = domainName,
-                }
-            );
-
-            // (Optional) Redirect HTTP sang HTTPS
-            // Nếu bạn muốn ép buộc HTTPS, hãy cấu hình lại listener port 80 ở trên để redirect
-            alb.AddListener(
-                "HttpListener",
-                new BaseApplicationListenerProps
-                {
-                    Port = 80,
-                    Open = true,
-                    DefaultTargetGroups = new[] { targetGroup },
-                }
-            );
-
-            // 5. Tạo CloudFront Distribution để tăng tốc độ truy cập và bảo mật
-            var distribution = new Distribution(
-                this,
-                "SiteDistribution",
-                new DistributionProps
-                {
-                    DefaultBehavior = new BehaviorOptions
-                    {
-                        Origin = new HttpOrigin(alb.LoadBalancerDnsName),
-                        ViewerProtocolPolicy = ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                        AllowedMethods = AllowedMethods.ALLOW_ALL,
-                        Compress = true,
-                    },
-                    DomainNames = new[] { domainName, $"www.{domainName}" },
-                    Certificate = certificate,
-                }
-            );
-
-            // 6. Cập nhật A Record trỏ tên miền về CloudFront thay vì ALB
-            new ARecord(
-                this,
-                "AliasRecordCF",
-                new ARecordProps
-                {
-                    Zone = hostedZone,
-                    Target = RecordTarget.FromAlias(new CloudFrontTarget(distribution)),
-                    RecordName = domainName,
                 }
             );
         }
