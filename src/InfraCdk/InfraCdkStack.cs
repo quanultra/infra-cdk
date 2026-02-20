@@ -147,8 +147,25 @@ namespace InfraCdk
                 "Allow MySQL from Bastion Host (SSM Port Forwarding)"
             );
 
+            // ── 10. Monitoring & Alerting (CloudWatch Alarms + Dashboard) ─────
+            // notificationEmail: set qua cdk deploy --context notificationEmail=admin@example.com
+            // hoặc cấu hình trong cdk.json: "context": { "notificationEmail": "admin@example.com" }
+            var notificationEmail = this.Node.TryGetContext("notificationEmail") as string;
+
+            new MonitoringConstruct(
+                this,
+                "Monitoring",
+                new MonitoringConstructProps
+                {
+                    FargateService = ecs.FargateService,
+                    Alb = loadBalancer.Alb,
+                    TargetGroup = ecs.TargetGroup,
+                    AuroraCluster = database.AuroraCluster,
+                    NotificationEmail = notificationEmail,
+                }
+            );
+
             // Ngăn compiler cảnh báo unused variable
-            _ = database;
             _ = cloudFront;
             _ = bastion;
         }

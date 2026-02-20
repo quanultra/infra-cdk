@@ -184,12 +184,81 @@ const string domainName = "example.com"; // ← Đổi thành domain của bạn
 
 ## 📝 Ghi chú vận hành
 
-| Việc cần làm | Lệnh |
+| Việc cần làm | Lệnh / Link |
 |---|---|
 | Xem ECS logs | AWS Console → CloudWatch → Log Groups → `/ecs/fargate-service-logs` |
 | Xem WAF metrics | AWS Console → WAF & Shield → WebACLs → `CloudFrontWebACL` |
 | Xem ALB access logs | AWS Console → S3 → `ALBLogBucket` |
 | Rotate DB password ngay | AWS Console → Secrets Manager → chọn secret → Rotate immediately |
+| Xem Dashboard | CloudFormation Output `DashboardUrl` |
+| Stop Bastion (tiết kiệm tiền) | `aws ec2 stop-instances --instance-ids <ID>` |
+
+---
+
+## 📊 Monitoring & Alerting (CloudWatch)
+
+### Danh sách CloudWatch Alarms
+
+| Alarm | Điều kiện | Nguyên nhân thường gặp |
+|-------|-----------|------------------------|
+| `ECS-CPU-High` | CPU > 80% × 15 phút | Traffic tăng đột biến, code không efficient |
+| `ECS-Memory-High` | Memory > 80% × 15 phút | Memory leak, Task Memory quá nhỏ |
+| `ALB-5XX-Errors` | > 10 lỗi 5XX / 5 phút | App crash, unhandled exception |
+| `ALB-High-Response-Time` | p99 > 2s × 10 phút | DB query chậm, N+1 query |
+| `ALB-Unhealthy-Hosts` | Unhealthy host > 0 × 2 phút | ECS task fail health check |
+| `Aurora-CPU-High` | CPU > 80% × 15 phút | Heavy query, thiếu index |
+| `Aurora-Connections-High` | Connections > 100 × 10 phút | Connection leak, pool không đủ |
+| `Aurora-Low-Freeable-Memory` | < 200 MB × 10 phút | Instance type quá nhỏ |
+
+> Khi alarm TRIGGER → SNS gửi email. Khi về lại OK → email thông báo resolved (trừ 5XX và Connections).
+
+### Cấu hình email nhận Alert
+
+Có 2 cách:
+
+**Cách 1 — Truyền qua CLI khi deploy:**
+
+```bash
+cdk deploy InfraCdkStack --context notificationEmail=admin@example.com
+```
+
+**Cách 2 — Cấu hình cố định trong `cdk.json`:**
+
+```json
+{
+  "context": {
+    "notificationEmail": "admin@example.com"
+  }
+}
+```
+
+> ⚠️ **Sau deploy**, AWS sẽ gửi email `"AWS Notification - Subscription Confirmation"` đến địa chỉ trên.
+> **Phải click "Confirm subscription"** trong email đó thì mới nhận được alarm notifications.
+
+### Xem CloudWatch Dashboard
+
+Dashboard `InfraOverview` được tạo tự động sau khi deploy. Gồm 9 biểu đồ:
+
+```text
+Row 1 — ECS Fargate:
+  [CPU Utilization %]      [Memory Utilization %]
+
+Row 2 — Application Load Balancer:
+  [4XX/5XX Error Counts]   [Response Time p50/p99]
+
+Row 3 — Aurora MySQL:
+  [CPU Utilization %]  [DB Connections]  [Freeable Memory]
+```
+
+Truy cập nhanh:
+
+```bash
+# Lấy URL Dashboard từ CloudFormation Output
+aws cloudformation describe-stacks \
+  --stack-name InfraCdkStack \
+  --query "Stacks[0].Outputs[?OutputKey=='DashboardUrl'].OutputValue" \
+  --output text
+```
 
 ---
 
