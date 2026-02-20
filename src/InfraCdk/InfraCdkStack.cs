@@ -215,6 +215,23 @@ namespace InfraCdk
                     },
                 }
             );
+
+            // Tạo S3 bucket để lưu trữ Access Logs của ALB (giúp debug và audit)
+            var albLogBucket = new Amazon.CDK.AWS.S3.Bucket(
+                this,
+                "ALBLogBucket",
+                new Amazon.CDK.AWS.S3.BucketProps
+                {
+                    RemovalPolicy = RemovalPolicy.DESTROY, // Xóa bucket khi destroy stack (chỉ dùng cho lab/dev)
+                    AutoDeleteObjects = true, // Tự động xóa objects trong bucket khi destroy
+                    Encryption = Amazon.CDK.AWS.S3.BucketEncryption.S3_MANAGED,
+                    BlockPublicAccess = Amazon.CDK.AWS.S3.BlockPublicAccess.BLOCK_ALL,
+                    EnforceSSL = true,
+                }
+            );
+
+            // Kích hoạt ghi log truy cập cho ALB vào bucket vừa tạo
+            alb.LogAccessLogs(albLogBucket);
             // Tạo listener cho ALB
             // Tạo listener cho ALB - Redirect HTTP sang HTTPS
             var listener = alb.AddListener(
@@ -348,7 +365,22 @@ namespace InfraCdk
 
             // 3. Thêm HTTPS Listener vào ALB - Cấu hình bảo mật kiểm tra Header từ CloudFront
             var customHeaderName = "X-Origin-Verify";
-            var customHeaderValue = "my-secret-random-string-123456"; // Nên dùng Secrets Manager trong thực tế
+            // Tạo Secret ngẫu nhiên trong AWS Secrets Manager thay vì hardcode
+            var headerSecret = new Secret(
+                this,
+                "HeaderSecret",
+                new SecretProps
+                {
+                    GenerateSecretString = new SecretStringGenerator
+                    {
+                        ExcludePunctuation = true,
+                        IncludeSpace = false,
+                        PasswordLength = 64,
+                    },
+                }
+            );
+            // Lấy giá trị secret để sử dụng (CDK sẽ resolve lúc deploy)
+            var customHeaderValue = headerSecret.SecretValue.UnsafeUnwrap();
 
             var httpsListener = alb.AddListener(
                 "HttpsListener",
