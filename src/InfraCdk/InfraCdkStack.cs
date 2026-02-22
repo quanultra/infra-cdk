@@ -49,6 +49,13 @@ namespace InfraCdk
         {
             const string domainName = "example.com";
 
+            // Đọc environment từ CDK context để quyết định RemovalPolicy
+            // Dev/Test (default): cdk deploy
+            // Production:         cdk deploy --context environment=production
+            //                     hoặc cdk.json: "context": { "environment": "production" }
+            var environment = this.Node.TryGetContext("environment") as string;
+            var isProduction = environment?.ToLower() == "production";
+
             // ── 1. Networking ─────────────────────────────────────────────────
             var networking = new NetworkingConstruct(this, "Networking");
 
@@ -60,22 +67,16 @@ namespace InfraCdk
             );
 
             // ── 3. Storage ────────────────────────────────────────────────────
-            var storage = new StorageConstruct(this, "Storage");
-
-            // ── 4. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
-            var ecs = new EcsConstruct(
+            // Production: Static bucket RETAIN | Dev: DESTROY
+            var storage = new StorageConstruct(
                 this,
-                "Ecs",
-                new EcsConstructProps
-                {
-                    Vpc = networking.Vpc,
-                    PrivateSubnet1 = networking.PrivateSubnet1,
-                    PrivateSubnet2 = networking.PrivateSubnet2,
-                    EcsSg = securityGroups.EcsSg,
-                }
+                "Storage",
+                new StorageConstructProps { IsProduction = isProduction }
             );
 
-            // ── 5. Database (Aurora + RDS Proxy) ──────────────────────────────
+            // ── 4. Database (Aurora + RDS Proxy) ──────────────────────────────
+            // Tạo Database TRƯỚC ECS để có thể truyền DbSecret và DbProxyEndpoint
+            // Production: RemovalPolicy.SNAPSHOT | Dev: DESTROY
             var database = new DatabaseConstruct(
                 this,
                 "Database",
@@ -85,6 +86,24 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     RdsSg = securityGroups.RdsSg,
+                    IsProduction = isProduction,
+                }
+            );
+
+            // ── 5. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
+            // Nhận DbSecret → CDK tự grant Task Execution Role quyền GetSecretValue
+            // Nhận DbProxyEndpoint → inject vào container làm env var DB_HOST
+            var ecs = new EcsConstruct(
+                this,
+                "Ecs",
+                new EcsConstructProps
+                {
+                    Vpc = networking.Vpc,
+                    PrivateSubnet1 = networking.PrivateSubnet1,
+                    PrivateSubnet2 = networking.PrivateSubnet2,
+                    EcsSg = securityGroups.EcsSg,
+                    DbSecret = database.AuroraCluster.Secret, // ISecret — auto-grant execution role
+                    DbProxyEndpoint = database.RdsProxy.Endpoint, // string token → env var DB_HOST
                 }
             );
 
@@ -109,6 +128,7 @@ namespace InfraCdk
                     TargetGroup = ecs.TargetGroup,
                     HostedZone = hostedZone,
                     DomainName = domainName,
+                    IsProduction = isProduction, // #8: DeletionProtection bật ở production
                 }
             );
 
