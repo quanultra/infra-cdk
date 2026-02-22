@@ -31,6 +31,13 @@ namespace InfraCdk.Constructs
         /// Được inject vào container dưới dạng env var: DB_HOST.
         /// </summary>
         public string DbProxyEndpoint { get; set; }
+
+        /// <summary>
+        /// true = production: scale-down ban đêm giữ lại tối thiểu 1 task (không bao giờ về 0).
+        /// false = dev/test: scale-down về 0 task để tiết kiệm chi phí hoàn toàn.
+        /// Set qua: cdk deploy --context environment=production
+        /// </summary>
+        public bool IsProduction { get; set; } = false;
     }
 
     /// <summary>
@@ -177,12 +184,22 @@ namespace InfraCdk.Constructs
                     //   3. Rollback = true: tự động rollback về Task Definition cũ đang hoạt động
                     // Không có Circuit Breaker → ECS cứ retry mãi → downtime kéo dài.
                     CircuitBreaker = new DeploymentCircuitBreaker { Rollback = true },
+
+                    // ── #7: Health Check Grace Period ──────────────────────
+                    // Sau khi task được đăng ký vào ALB, chờ 60s TRƯỚC khi bắt đầu gửi health check.
+                    // Cần thiết vì:
+                    //   - App cần thời gian khởi động (.NET warm-up, kết nối DB, load cache)
+                    //   - Nếu không có: ALB ngay lập tức check /health → fail → trigger Circuit Breaker
+                    //   - Đặc biệt quan trọng khi scale từ 0 tasks lên (sáng sớm 7h)
+                    HealthCheckGracePeriod = Duration.Seconds(60),
                 }
             );
 
             FargateService.AttachToApplicationTargetGroup(TargetGroup);
 
             // --- Auto Scaling: CPU-Based ---
+            // Giới hạn tổng thể: min=2 (khi đang hoạt động ban ngày), max=8 (peak load)
+            // Lưu ý: Scheduled actions bên dưới sẽ OVERRIDE giới hạn này tạm thời
             var scaling = FargateService.AutoScaleTaskCount(
                 new EnableScalingProps { MinCapacity = 2, MaxCapacity = 8 }
             );
@@ -197,19 +214,30 @@ namespace InfraCdk.Constructs
                 }
             );
 
-            // --- Auto Scaling: Schedule (tiết kiệm chi phí ban đêm) ---
-            // Tắt ECS lúc 22:00 VN (15:00 UTC)
+            // --- Auto Scaling: Schedule ---
+            // Tắt ECS ban đêm để tiết kiệm chi phí (22:00 VN = 15:00 UTC)
+            // Production (IsProduction=true):
+            //   → MinCapacity=1 — luôn giữ tối thiểu 1 task để xử lý emergency request
+            //   → MaxCapacity=1 — giới hạn scale khi traffic đêm thấp
+            //   → Tiết kiệm ~50% so với ban ngày (1 task thay vì 2 task)
+            // Dev/Test (IsProduction=false):
+            //   → MinCapacity=0, MaxCapacity=0 — tắt hoàn toàn, tiết kiệm 100% Fargate cost đêm
+            //   → Rủi ro chấp nhận được: nếu scale-up sai, chỉ ảnh hưởng dev env
+            var nightMinCapacity = props.IsProduction ? 1 : 0;
+            var nightMaxCapacity = props.IsProduction ? 1 : 0;
+
             scaling.ScaleOnSchedule(
                 "ScaleDownAtNight",
                 new ScalingSchedule
                 {
                     Schedule = Schedule.Cron(new CronOptions { Hour = "15", Minute = "0" }),
-                    MinCapacity = 0,
-                    MaxCapacity = 0,
+                    MinCapacity = nightMinCapacity,
+                    MaxCapacity = nightMaxCapacity,
                 }
             );
 
             // Bật lại ECS lúc 07:00 VN (00:00 UTC)
+            // Min=2 để đảm bảo high availability ngay khi scale-up
             scaling.ScaleOnSchedule(
                 "ScaleUpInMorning",
                 new ScalingSchedule
