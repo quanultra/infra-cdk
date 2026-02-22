@@ -128,6 +128,7 @@ namespace InfraCdk
                     TargetGroup = ecs.TargetGroup,
                     HostedZone = hostedZone,
                     DomainName = domainName,
+                    IsProduction = isProduction, // #8: DeletionProtection bật ở production
                 }
             );
 

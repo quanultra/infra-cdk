@@ -126,6 +126,30 @@ namespace InfraCdk.Constructs
                     Port = 80,
                     Protocol = ApplicationProtocol.HTTP,
                     TargetType = TargetType.IP,
+
+                    // ── #18: DeregistrationDelay ─────────────────────────────
+                    // Khi ECS scale-in, ALB đợi bao lâu trước khi xóa task khỏi target group.
+                    // Default = 300s (5 phút) — quá dài, request in-flight chỉ cần vài giây.
+                    // 30s đủ để drain request đang xử lý mà không chặn scale-in lâu.
+                    DeregistrationDelay = Duration.Seconds(30),
+
+                    // ── #5: Health Check ──────────────────────────────────────
+                    // ALB dùng endpoint này để kiểm tra task còn sống không.
+                    // App PHẢI trả về HTTP 200 tại GET /health khi healthy.
+                    // Nếu không có /health endpoint, ALB sẽ dùng / — nhưng tốt nhất nên định nghĩa rõ.
+                    HealthCheck = new Amazon.CDK.AWS.ElasticLoadBalancingV2.HealthCheck
+                    {
+                        Path = "/health",
+                        HealthyHttpCodes = "200",
+                        // 2 lần liên tiếp OK → task được đánh dấu Healthy (thay default 5)
+                        HealthyThresholdCount = 2,
+                        // 3 lần liên tiếp fail → task bị đánh dấu Unhealthy và bị replace
+                        UnhealthyThresholdCount = 3,
+                        // Mỗi request health check timeout sau 5s
+                        Timeout = Duration.Seconds(5),
+                        // Cứ 30s gửi 1 request health check
+                        Interval = Duration.Seconds(30),
+                    },
                 }
             );
 
@@ -145,6 +169,14 @@ namespace InfraCdk.Constructs
                     {
                         Subnets = new ISubnet[] { props.PrivateSubnet1, props.PrivateSubnet2 },
                     },
+
+                    // ── #6: Deployment Circuit Breaker ───────────────────────
+                    // Nếu deploy mới bị lỗi (tasks crash liên tục), ECS sẽ:
+                    //   1. Phát hiện: tasks mới không đạt trạng thái RUNNING trong thời gian nhất định
+                    //   2. Dừng deploy: không tiếp tục rollout task mới lỗi
+                    //   3. Rollback = true: tự động rollback về Task Definition cũ đang hoạt động
+                    // Không có Circuit Breaker → ECS cứ retry mãi → downtime kéo dài.
+                    CircuitBreaker = new DeploymentCircuitBreaker { Rollback = true },
                 }
             );
 

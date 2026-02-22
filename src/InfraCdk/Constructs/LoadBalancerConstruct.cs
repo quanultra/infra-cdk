@@ -18,6 +18,12 @@ namespace InfraCdk.Constructs
         public ApplicationTargetGroup TargetGroup { get; set; }
         public IHostedZone HostedZone { get; set; }
         public string DomainName { get; set; }
+
+        /// <summary>
+        /// true = production: bật DeletionProtection trên ALB — ngăn xóa nhầm qua Console/CLI.
+        /// false = dev/test: tắt để có thể chạy `cdk destroy` không bị block.
+        /// </summary>
+        public bool IsProduction { get; set; } = false;
     }
 
     /// <summary>
@@ -82,6 +88,12 @@ namespace InfraCdk.Constructs
                     {
                         Subnets = new ISubnet[] { props.PublicSubnet1, props.PublicSubnet2 },
                     },
+
+                    // ── #8: Deletion Protection ──────────────────────────────
+                    // Production: true — ngăn xóa nhầm ALB qua Console, CLI, hay cdk destroy.
+                    //   Kết quả: `cdk destroy` sẽ fail và báo lỗi — phải tắt protection thủ công trước.
+                    // Dev/Test: false — để cdk destroy hoạt động bình thường.
+                    DeletionProtection = props.IsProduction,
                 }
             );
 
