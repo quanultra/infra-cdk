@@ -12,6 +12,13 @@ namespace InfraCdk.Constructs
         public ISubnet PrivateSubnet1 { get; set; }
         public ISubnet PrivateSubnet2 { get; set; }
         public SecurityGroup RdsSg { get; set; }
+
+        /// <summary>
+        /// true = production: Aurora dùng RemovalPolicy.SNAPSHOT (lưu snapshot trước khi xóa).
+        /// false = dev/test: RemovalPolicy.DESTROY (xóa sạch để teardown nhanh).
+        /// Set qua: cdk deploy --context environment=production
+        /// </summary>
+        public bool IsProduction { get; set; } = false;
     }
 
     /// <summary>
@@ -90,7 +97,12 @@ namespace InfraCdk.Constructs
                     SecurityGroups = new[] { props.RdsSg },
                     SubnetGroup = rdsSubnetGroup,
                     DefaultDatabaseName = "mydatabase",
-                    RemovalPolicy = RemovalPolicy.DESTROY, // TODO: Đổi thành SNAPSHOT cho production
+                    // Production: SNAPSHOT — CloudFormation tự động tạo DB snapshot trước khi xóa,
+                    //             có thể restore thủ công nếu cần.
+                    // Dev/Test:   DESTROY — xóa sạch để có thể chạy lcædk destroy không bị block.
+                    RemovalPolicy = props.IsProduction
+                        ? RemovalPolicy.SNAPSHOT
+                        : RemovalPolicy.DESTROY,
                 }
             );
 

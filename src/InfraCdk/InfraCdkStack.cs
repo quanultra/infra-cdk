@@ -49,6 +49,13 @@ namespace InfraCdk
         {
             const string domainName = "example.com";
 
+            // Đọc environment từ CDK context để quyết định RemovalPolicy
+            // Dev/Test (default): cdk deploy
+            // Production:         cdk deploy --context environment=production
+            //                     hoặc cdk.json: "context": { "environment": "production" }
+            var environment = this.Node.TryGetContext("environment") as string;
+            var isProduction = environment?.ToLower() == "production";
+
             // ── 1. Networking ─────────────────────────────────────────────────
             var networking = new NetworkingConstruct(this, "Networking");
 
@@ -60,10 +67,16 @@ namespace InfraCdk
             );
 
             // ── 3. Storage ────────────────────────────────────────────────────
-            var storage = new StorageConstruct(this, "Storage");
+            // Production: Static bucket RETAIN | Dev: DESTROY
+            var storage = new StorageConstruct(
+                this,
+                "Storage",
+                new StorageConstructProps { IsProduction = isProduction }
+            );
 
             // ── 4. Database (Aurora + RDS Proxy) ──────────────────────────────
             // Tạo Database TRƯỚC ECS để có thể truyền DbSecret và DbProxyEndpoint
+            // Production: RemovalPolicy.SNAPSHOT | Dev: DESTROY
             var database = new DatabaseConstruct(
                 this,
                 "Database",
@@ -73,6 +86,7 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     RdsSg = securityGroups.RdsSg,
+                    IsProduction = isProduction,
                 }
             );
 
