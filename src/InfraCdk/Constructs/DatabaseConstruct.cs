@@ -14,11 +14,10 @@ namespace InfraCdk.Constructs
         public SecurityGroup RdsSg { get; set; }
 
         /// <summary>
-        /// true = production: Aurora dùng RemovalPolicy.SNAPSHOT (lưu snapshot trước khi xóa).
-        /// false = dev/test: RemovalPolicy.DESTROY (xóa sạch để teardown nhanh).
-        /// Set qua: cdk deploy --context environment=production
+        /// Cấu hình theo environment: xác định RemovalPolicy và Aurora instance type.
+        /// Được tạo từ EnvironmentConfig.FromName() trong InfraCdkStack.
         /// </summary>
-        public bool IsProduction { get; set; } = false;
+        public EnvironmentConfig EnvConfig { get; set; }
     }
 
     /// <summary>
@@ -71,9 +70,10 @@ namespace InfraCdk.Constructs
                         "writer",
                         new ProvisionedClusterInstanceProps
                         {
+                            // Dev/Stg: t3.small (~$0.04/h) | Prod: t3.medium (~$0.08/h)
                             InstanceType = Amazon.CDK.AWS.EC2.InstanceType.Of(
-                                InstanceClass.BURSTABLE3,
-                                InstanceSize.MEDIUM
+                                props.EnvConfig.AuroraInstanceClass,
+                                props.EnvConfig.AuroraInstanceSize
                             ),
                             PubliclyAccessible = false,
                         }
@@ -85,8 +85,8 @@ namespace InfraCdk.Constructs
                             new ProvisionedClusterInstanceProps
                             {
                                 InstanceType = Amazon.CDK.AWS.EC2.InstanceType.Of(
-                                    InstanceClass.BURSTABLE3,
-                                    InstanceSize.MEDIUM
+                                    props.EnvConfig.AuroraInstanceClass,
+                                    props.EnvConfig.AuroraInstanceSize
                                 ),
                                 PubliclyAccessible = false,
                             }
@@ -97,12 +97,11 @@ namespace InfraCdk.Constructs
                     SecurityGroups = new[] { props.RdsSg },
                     SubnetGroup = rdsSubnetGroup,
                     DefaultDatabaseName = "mydatabase",
-                    // Production: SNAPSHOT — CloudFormation tự động tạo DB snapshot trước khi xóa,
-                    //             có thể restore thủ công nếu cần.
-                    // Dev/Test:   DESTROY — xóa sạch để có thể chạy lcædk destroy không bị block.
-                    RemovalPolicy = props.IsProduction
-                        ? RemovalPolicy.SNAPSHOT
-                        : RemovalPolicy.DESTROY,
+                    // Aurora instance type từ EnvironmentConfig:
+                    //   Dev:     t3.small  — giảm ~50% chi phí so với t3.medium
+                    //   Staging: t3.small  — staging không cần hiệu năng cao
+                    //   Prod:    t3.medium — đủ mạnh cho production traffic
+                    RemovalPolicy = props.EnvConfig.DbRemovalPolicy,
                 }
             );
 

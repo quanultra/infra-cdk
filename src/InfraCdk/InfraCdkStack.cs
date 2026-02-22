@@ -17,6 +17,12 @@ namespace InfraCdk
         /// Được truyền vào đây qua CrossRegionReferences (CDK dùng SSM Parameter Store).
         /// </summary>
         public string WafArn { get; set; }
+
+        /// <summary>
+        /// Cấu hình theo environment — được tạo từ Program.cs qua EnvironmentConfig.FromName().
+        /// Chứa toàn bộ tham số thay đổi theo environment (Dev / Stg / Prod).
+        /// </summary>
+        public EnvironmentConfig EnvConfig { get; set; }
     }
 
     /// <summary>
@@ -48,8 +54,8 @@ namespace InfraCdk
             : base(scope, id, props)
         {
             // ── Đọc Project Configuration từ CDK Context ──────────────────────
-            // Thay đổi trong cdk.json hoặc truyền qua CLI:
-            //   cdk deploy --context domainName=myapp.com --context environment=production
+            // Environment config được nhận qua props (xem Program.cs) — không đọc lại ở đây.
+            // domainName và staticBucketName vẫn đọc từ context để hỗ trợ override linh hoạt.
 
             // domainName: BẮT BUỘC — dùng cho Route53, ACM Certificate, CloudFront
             var domainName = this.Node.TryGetContext("domainName") as string;
@@ -65,9 +71,8 @@ namespace InfraCdk
             // Lưu ý: tên bucket phải unique toàn cầu → chỉ nên set nếu cần tên cố định
             var staticBucketName = this.Node.TryGetContext("staticBucketName") as string;
 
-            // environment → isProduction flag — kiểm soát RemovalPolicy, DeletionProtection, ECS scale
-            var environment = this.Node.TryGetContext("environment") as string;
-            var isProduction = environment?.ToLower() == "production";
+            // EnvConfig đến từ props — xem EnvironmentConfig.cs để biết các preset
+            var envConfig = props?.EnvConfig ?? EnvironmentConfig.Development();
 
             // ── 1. Networking ─────────────────────────────────────────────────
             var networking = new NetworkingConstruct(this, "Networking");
@@ -86,7 +91,7 @@ namespace InfraCdk
                 "Storage",
                 new StorageConstructProps
                 {
-                    IsProduction = isProduction,
+                    EnvConfig = envConfig,
                     StaticBucketName = staticBucketName, // null → CDK tự sinh tên unique
                 }
             );
@@ -103,7 +108,7 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     RdsSg = securityGroups.RdsSg,
-                    IsProduction = isProduction,
+                    EnvConfig = envConfig,
                 }
             );
 
@@ -122,7 +127,7 @@ namespace InfraCdk
                     EcsSg = securityGroups.EcsSg,
                     DbSecret = database.AuroraCluster.Secret, // ISecret — auto-grant execution role
                     DbProxyEndpoint = database.RdsProxy.Endpoint, // string token → env var DB_HOST
-                    IsProduction = isProduction, // #7: scale-down behavior
+                    EnvConfig = envConfig, // #7: scale-down behavior
                 }
             );
 
@@ -147,7 +152,7 @@ namespace InfraCdk
                     TargetGroup = ecs.TargetGroup,
                     HostedZone = hostedZone,
                     DomainName = domainName,
-                    IsProduction = isProduction, // #8: DeletionProtection bật ở production
+                    EnvConfig = envConfig, // #8: DeletionProtection bật ở production
                 }
             );
 

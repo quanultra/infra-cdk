@@ -7,12 +7,10 @@ namespace InfraCdk.Constructs
     public class StorageConstructProps
     {
         /// <summary>
-        /// true = production: Static bucket dùng RemovalPolicy.RETAIN — giữ lại file sau khi stack bị xóa.
-        ///                    AutoDeleteObjects bị tắt để không xóa nhầm file production.
-        /// false = dev/test:  RemovalPolicy.DESTROY + AutoDeleteObjects = true — xóa sạch khi teardown.
-        /// Set qua: cdk deploy --context environment=production
+        /// Cấu hình theo environment — xác định RemovalPolicy và AutoDelete cho S3 bucket.
+        /// Được tạo từ EnvironmentConfig.FromName() trong InfraCdkStack.
         /// </summary>
-        public bool IsProduction { get; set; } = false;
+        public EnvironmentConfig EnvConfig { get; set; }
 
         /// <summary>
         /// Tên cụ thể cho S3 Static Bucket. Nếu null/trống, CDK tự sinh tên unique (an toàn hơn).
@@ -83,20 +81,15 @@ namespace InfraCdk.Constructs
             );
 
             // ── Static Assets Bucket ──────────────────────────────────────────
-            // Production: RETAIN — giữ lại toàn bộ file tĩnh nếu stack bị xóa nhầm.
-            //             ⚠️ Phải xóa bucket thủ công trong console nếu muốn xóa thật sự.
-            // Dev/Test:   DESTROY — sạch hoàn toàn khi cdk destroy.
-            var staticRemovalPolicy = props.IsProduction
-                ? RemovalPolicy.RETAIN
-                : RemovalPolicy.DESTROY;
-
+            // Dev:        DESTROY + AutoDelete — xóa sạch khi cdk destroy
+            // Staging:    RETAIN  + no AutoDelete — giữ bucket cho debugging
+            // Production: RETAIN  + no AutoDelete — KHÔNG BAO GIỜ xóa nhầm assets
             StaticBucket = new Bucket(
                 this,
                 "StaticBucket",
                 new BucketProps
                 {
                     // StaticBucketName từ CDK context: null → CDK sinh tên unique (an toàn hơn)
-                    // có tên cụ thể → dùng tên đó (cần unique toàn cầu)
                     BucketName = string.IsNullOrWhiteSpace(props.StaticBucketName)
                         ? null
                         : props.StaticBucketName,
@@ -104,11 +97,8 @@ namespace InfraCdk.Constructs
                     Encryption = BucketEncryption.S3_MANAGED,
                     BlockPublicAccess = BlockPublicAccess.BLOCK_ALL,
                     EnforceSSL = true,
-                    RemovalPolicy = staticRemovalPolicy,
-                    // AutoDeleteObjects chỉ dùng với DESTROY:
-                    // Production: false → bảo vệ files khỏi bị xóa tự động
-                    // Dev/Test:   true → Lambda xóa hết object trước khi xóa bucket
-                    AutoDeleteObjects = !props.IsProduction,
+                    RemovalPolicy = props.EnvConfig.StaticBucketRemovalPolicy,
+                    AutoDeleteObjects = props.EnvConfig.StaticBucketAutoDelete,
                     LifecycleRules = new[]
                     {
                         // Current version: sau 90 ngày → S3-IA

@@ -33,11 +33,10 @@ namespace InfraCdk.Constructs
         public string DbProxyEndpoint { get; set; }
 
         /// <summary>
-        /// true = production: scale-down ban đêm giữ lại tối thiểu 1 task (không bao giờ về 0).
-        /// false = dev/test: scale-down về 0 task để tiết kiệm chi phí hoàn toàn.
-        /// Set qua: cdk deploy --context environment=production
+        /// Cấu hình theo environment — xác định ECS scaling values, desired count.
+        /// Được tạo từ EnvironmentConfig.FromName() trong InfraCdkStack.
         /// </summary>
-        public bool IsProduction { get; set; } = false;
+        public EnvironmentConfig EnvConfig { get; set; }
     }
 
     /// <summary>
@@ -198,10 +197,15 @@ namespace InfraCdk.Constructs
             FargateService.AttachToApplicationTargetGroup(TargetGroup);
 
             // --- Auto Scaling: CPU-Based ---
-            // Giới hạn tổng thể: min=2 (khi đang hoạt động ban ngày), max=8 (peak load)
-            // Lưu ý: Scheduled actions bên dưới sẽ OVERRIDE giới hạn này tạm thời
+            // Giới hạn tổng thể theo EnvironmentConfig:
+            //   Dev:  Min=1, Max=4 | Stg: Min=1, Max=4 | Prod: Min=2, Max=8
+            // Scheduled actions bên dưới sẽ OVERRIDE giới hạn này vào ban đêm
             var scaling = FargateService.AutoScaleTaskCount(
-                new EnableScalingProps { MinCapacity = 2, MaxCapacity = 8 }
+                new EnableScalingProps
+                {
+                    MinCapacity = props.EnvConfig.EcsMinCapacity,
+                    MaxCapacity = props.EnvConfig.EcsMaxCapacity,
+                }
             );
 
             scaling.ScaleOnCpuUtilization(
@@ -215,24 +219,16 @@ namespace InfraCdk.Constructs
             );
 
             // --- Auto Scaling: Schedule ---
-            // Tắt ECS ban đêm để tiết kiệm chi phí (22:00 VN = 15:00 UTC)
-            // Production (IsProduction=true):
-            //   → MinCapacity=1 — luôn giữ tối thiểu 1 task để xử lý emergency request
-            //   → MaxCapacity=1 — giới hạn scale khi traffic đêm thấp
-            //   → Tiết kiệm ~50% so với ban ngày (1 task thay vì 2 task)
-            // Dev/Test (IsProduction=false):
-            //   → MinCapacity=0, MaxCapacity=0 — tắt hoàn toàn, tiết kiệm 100% Fargate cost đêm
-            //   → Rủi ro chấp nhận được: nếu scale-up sai, chỉ ảnh hưởng dev env
-            var nightMinCapacity = props.IsProduction ? 1 : 0;
-            var nightMaxCapacity = props.IsProduction ? 1 : 0;
-
+            // Tắt ECS ban đêm (22:00 VN = 15:00 UTC) theo EnvironmentConfig:
+            //   Dev/Stg → 0 tasks — tắt hoàn toàn, tiết kiệm 100% Fargate cost
+            //   Prod    → 1 task — luôn có task sẵn sàng, tránh cold start hoàn toàn
             scaling.ScaleOnSchedule(
                 "ScaleDownAtNight",
                 new ScalingSchedule
                 {
                     Schedule = Schedule.Cron(new CronOptions { Hour = "15", Minute = "0" }),
-                    MinCapacity = nightMinCapacity,
-                    MaxCapacity = nightMaxCapacity,
+                    MinCapacity = props.EnvConfig.EcsNightMinCapacity,
+                    MaxCapacity = props.EnvConfig.EcsNightMaxCapacity,
                 }
             );
 
@@ -243,8 +239,8 @@ namespace InfraCdk.Constructs
                 new ScalingSchedule
                 {
                     Schedule = Schedule.Cron(new CronOptions { Hour = "0", Minute = "0" }),
-                    MinCapacity = 2,
-                    MaxCapacity = 8,
+                    MinCapacity = props.EnvConfig.EcsMinCapacity,
+                    MaxCapacity = props.EnvConfig.EcsMaxCapacity,
                 }
             );
         }
