@@ -1,10 +1,14 @@
+using System.Collections.Generic;
 using Amazon.CDK;
 using Amazon.CDK.AWS.ApplicationAutoScaling;
 using Amazon.CDK.AWS.EC2;
 using Amazon.CDK.AWS.ECS;
 using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Amazon.CDK.AWS.Logs;
+using Amazon.CDK.AWS.SecretsManager;
 using Constructs;
+// Alias tránh xung đột tên giữa Amazon.CDK.AWS.ECS.Secret và Amazon.CDK.AWS.SecretsManager.Secret
+using EcsSecret = Amazon.CDK.AWS.ECS.Secret;
 
 namespace InfraCdk.Constructs
 {
@@ -14,6 +18,19 @@ namespace InfraCdk.Constructs
         public ISubnet PrivateSubnet1 { get; set; }
         public ISubnet PrivateSubnet2 { get; set; }
         public SecurityGroup EcsSg { get; set; }
+
+        /// <summary>
+        /// Secret chứa DB credentials (username, password) từ DatabaseConstruct.
+        /// CDK sẽ tự động grant secretsmanager:GetSecretValue cho ECS Task Execution Role.
+        /// App nhận credentials qua environment variables: DB_USERNAME, DB_PASSWORD.
+        /// </summary>
+        public ISecret DbSecret { get; set; }
+
+        /// <summary>
+        /// Endpoint của RDS Proxy — app nên kết nối qua đây thay vì Aurora trực tiếp.
+        /// Được inject vào container dưới dạng env var: DB_HOST.
+        /// </summary>
+        public string DbProxyEndpoint { get; set; }
     }
 
     /// <summary>
@@ -65,6 +82,36 @@ namespace InfraCdk.Constructs
                     Logging = LogDrivers.AwsLogs(
                         new AwsLogDriverProps { LogGroup = logGroup, StreamPrefix = "fargate" }
                     ),
+
+                    // ── DB Credentials Injection ──────────────────────────────
+                    // CDK tự động grant Task Execution Role quyền GetSecretValue.
+                    // ECS agent fetch secret và inject TRƯỚC khi container khởi động.
+                    // App chỉ cần đọc Environment.GetEnvironmentVariable() — không cần AWS SDK.
+                    Secrets =
+                        props.DbSecret != null
+                            ? new Dictionary<string, EcsSecret>
+                            {
+                                // Inject từng field của JSON secret thành env var riêng
+                                {
+                                    "DB_USERNAME",
+                                    EcsSecret.FromSecretsManager(props.DbSecret, "username")
+                                },
+                                {
+                                    "DB_PASSWORD",
+                                    EcsSecret.FromSecretsManager(props.DbSecret, "password")
+                                },
+                            }
+                            : null,
+
+                    // ── DB Connection Config (non-secret) ────────────────────
+                    // Kết nối qua RDS Proxy để tận dụng connection pooling
+                    Environment = new Dictionary<string, string>
+                    {
+                        { "DB_HOST", props.DbProxyEndpoint ?? string.Empty },
+                        { "DB_PORT", "3306" },
+                        { "DB_NAME", "mydatabase" },
+                        { "ASPNETCORE_ENVIRONMENT", "Production" },
+                    },
                 }
             );
 

@@ -62,20 +62,8 @@ namespace InfraCdk
             // ── 3. Storage ────────────────────────────────────────────────────
             var storage = new StorageConstruct(this, "Storage");
 
-            // ── 4. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
-            var ecs = new EcsConstruct(
-                this,
-                "Ecs",
-                new EcsConstructProps
-                {
-                    Vpc = networking.Vpc,
-                    PrivateSubnet1 = networking.PrivateSubnet1,
-                    PrivateSubnet2 = networking.PrivateSubnet2,
-                    EcsSg = securityGroups.EcsSg,
-                }
-            );
-
-            // ── 5. Database (Aurora + RDS Proxy) ──────────────────────────────
+            // ── 4. Database (Aurora + RDS Proxy) ──────────────────────────────
+            // Tạo Database TRƯỚC ECS để có thể truyền DbSecret và DbProxyEndpoint
             var database = new DatabaseConstruct(
                 this,
                 "Database",
@@ -85,6 +73,23 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     RdsSg = securityGroups.RdsSg,
+                }
+            );
+
+            // ── 5. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
+            // Nhận DbSecret → CDK tự grant Task Execution Role quyền GetSecretValue
+            // Nhận DbProxyEndpoint → inject vào container làm env var DB_HOST
+            var ecs = new EcsConstruct(
+                this,
+                "Ecs",
+                new EcsConstructProps
+                {
+                    Vpc = networking.Vpc,
+                    PrivateSubnet1 = networking.PrivateSubnet1,
+                    PrivateSubnet2 = networking.PrivateSubnet2,
+                    EcsSg = securityGroups.EcsSg,
+                    DbSecret = database.AuroraCluster.Secret, // ISecret — auto-grant execution role
+                    DbProxyEndpoint = database.RdsProxy.Endpoint, // string token → env var DB_HOST
                 }
             );
 
