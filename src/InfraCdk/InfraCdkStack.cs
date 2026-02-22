@@ -93,6 +93,7 @@ namespace InfraCdk
             // ── 5. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
             // Nhận DbSecret → CDK tự grant Task Execution Role quyền GetSecretValue
             // Nhận DbProxyEndpoint → inject vào container làm env var DB_HOST
+            // IsProduction → scale-down: production giữ min 1 task, dev về 0
             var ecs = new EcsConstruct(
                 this,
                 "Ecs",
@@ -104,6 +105,7 @@ namespace InfraCdk
                     EcsSg = securityGroups.EcsSg,
                     DbSecret = database.AuroraCluster.Secret, // ISecret — auto-grant execution role
                     DbProxyEndpoint = database.RdsProxy.Endpoint, // string token → env var DB_HOST
+                    IsProduction = isProduction, // #7: scale-down behavior
                 }
             );
 
