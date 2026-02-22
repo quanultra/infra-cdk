@@ -13,6 +13,14 @@ namespace InfraCdk.Constructs
         /// Set qua: cdk deploy --context environment=production
         /// </summary>
         public bool IsProduction { get; set; } = false;
+
+        /// <summary>
+        /// Tên cụ thể cho S3 Static Bucket. Nếu null/trống, CDK tự sinh tên unique (an toàn hơn).
+        /// ⚠̃  Bucket name phải unique toàn cầu — chỉ nên set nếu cần tên cố định.
+        /// Set qua cdk.json: "staticBucketName": "my-app-static-prod"
+        /// hoặc CLI:        cdk deploy --context staticBucketName=my-app-static-prod
+        /// </summary>
+        public string StaticBucketName { get; set; } = null;
     }
 
     /// <summary>
@@ -87,7 +95,11 @@ namespace InfraCdk.Constructs
                 "StaticBucket",
                 new BucketProps
                 {
-                    BucketName = "my-static-resources-bucket",
+                    // StaticBucketName từ CDK context: null → CDK sinh tên unique (an toàn hơn)
+                    // có tên cụ thể → dùng tên đó (cần unique toàn cầu)
+                    BucketName = string.IsNullOrWhiteSpace(props.StaticBucketName)
+                        ? null
+                        : props.StaticBucketName,
                     Versioned = true,
                     Encryption = BucketEncryption.S3_MANAGED,
                     BlockPublicAccess = BlockPublicAccess.BLOCK_ALL,

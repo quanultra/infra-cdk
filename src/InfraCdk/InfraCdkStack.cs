@@ -47,12 +47,25 @@ namespace InfraCdk
         internal InfraCdkStack(Construct scope, string id, InfraCdkStackProps props = null)
             : base(scope, id, props)
         {
-            const string domainName = "example.com";
+            // ── Đọc Project Configuration từ CDK Context ──────────────────────
+            // Thay đổi trong cdk.json hoặc truyền qua CLI:
+            //   cdk deploy --context domainName=myapp.com --context environment=production
 
-            // Đọc environment từ CDK context để quyết định RemovalPolicy
-            // Dev/Test (default): cdk deploy
-            // Production:         cdk deploy --context environment=production
-            //                     hoặc cdk.json: "context": { "environment": "production" }
+            // domainName: BẮT BUỘC — dùng cho Route53, ACM Certificate, CloudFront
+            var domainName = this.Node.TryGetContext("domainName") as string;
+            if (string.IsNullOrWhiteSpace(domainName))
+                throw new System.Exception(
+                    "CDK context 'domainName' chưa được set.\n"
+                        + "Cách fix:\n"
+                        + "  1. Thêm vào cdk.json: \"domainName\": \"yourdomain.com\"\n"
+                        + "  2. Hoặc CLI: cdk deploy --context domainName=yourdomain.com"
+                );
+
+            // staticBucketName: TÙY CHỌN — nếu không set, CDK tự sinh tên unique
+            // Lưu ý: tên bucket phải unique toàn cầu → chỉ nên set nếu cần tên cố định
+            var staticBucketName = this.Node.TryGetContext("staticBucketName") as string;
+
+            // environment → isProduction flag — kiểm soát RemovalPolicy, DeletionProtection, ECS scale
             var environment = this.Node.TryGetContext("environment") as string;
             var isProduction = environment?.ToLower() == "production";
 
@@ -71,7 +84,11 @@ namespace InfraCdk
             var storage = new StorageConstruct(
                 this,
                 "Storage",
-                new StorageConstructProps { IsProduction = isProduction }
+                new StorageConstructProps
+                {
+                    IsProduction = isProduction,
+                    StaticBucketName = staticBucketName, // null → CDK tự sinh tên unique
+                }
             );
 
             // ── 4. Database (Aurora + RDS Proxy) ──────────────────────────────
