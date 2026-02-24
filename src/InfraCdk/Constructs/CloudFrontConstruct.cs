@@ -5,6 +5,7 @@ using Amazon.CDK.AWS.CloudFront.Origins;
 using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Amazon.CDK.AWS.Route53;
 using Amazon.CDK.AWS.Route53.Targets;
+using Amazon.CDK.AWS.S3;
 using Constructs;
 
 namespace InfraCdk.Constructs
@@ -23,6 +24,12 @@ namespace InfraCdk.Constructs
         /// WAF phải có Scope = "CLOUDFRONT" và được deploy tại us-east-1.
         /// </summary>
         public string WafArn { get; set; }
+
+        /// <summary>
+        /// S3 Bucket chứa static assets (CSS, JS, images...).
+        /// CloudFront tạo behavior riêng cho path /static/* trỏ về bucket này.
+        /// </summary>
+        public IBucket StaticBucket { get; set; }
     }
 
     /// <summary>
@@ -39,6 +46,21 @@ namespace InfraCdk.Constructs
         {
             // --- CloudFront Distribution ---
             // Origin là ALB HTTPS endpoint, gắn header bí mật để ALB xác thực
+            var albOrigin = new HttpOrigin(
+                props.Alb.LoadBalancerDnsName,
+                new HttpOriginProps
+                {
+                    ProtocolPolicy = OriginProtocolPolicy.HTTPS_ONLY,
+                    CustomHeaders = new Dictionary<string, string>
+                    {
+                        { props.CustomHeaderName, props.CustomHeaderValue },
+                    },
+                }
+            );
+
+            // #10: S3 origin cho static assets — CDK tự động tạo OAI và grant s3:GetObject
+            var s3Origin = new S3Origin(props.StaticBucket);
+
             Distribution = new Distribution(
                 this,
                 "SiteDistribution",
@@ -46,20 +68,31 @@ namespace InfraCdk.Constructs
                 {
                     DefaultBehavior = new BehaviorOptions
                     {
-                        Origin = new HttpOrigin(
-                            props.Alb.LoadBalancerDnsName,
-                            new HttpOriginProps
-                            {
-                                ProtocolPolicy = OriginProtocolPolicy.HTTPS_ONLY,
-                                CustomHeaders = new Dictionary<string, string>
-                                {
-                                    { props.CustomHeaderName, props.CustomHeaderValue },
-                                },
-                            }
-                        ),
+                        Origin = albOrigin,
                         ViewerProtocolPolicy = ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                         AllowedMethods = AllowedMethods.ALLOW_ALL,
                         Compress = true,
+                        // #10: Explicit CACHING_DISABLED cho dynamic API content.
+                        // Nếu không set, CloudFront có thể cache API response sai.
+                        CachePolicy = CachePolicy.CACHING_DISABLED,
+                        // Forward tất cả headers/cookies/query strings về ALB để app xử lý.
+                        OriginRequestPolicy = OriginRequestPolicy.ALL_VIEWER,
+                    },
+                    // #10: Behavior riêng cho /static/* — serve từ S3, cache dài hạn.
+                    // Không tốn tài nguyên ECS cho static assets.
+                    AdditionalBehaviors = new Dictionary<string, IBehaviorOptions>
+                    {
+                        {
+                            "/static/*",
+                            new BehaviorOptions
+                            {
+                                Origin = s3Origin,
+                                ViewerProtocolPolicy = ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                                AllowedMethods = AllowedMethods.ALLOW_GET_HEAD,
+                                CachePolicy = CachePolicy.CACHING_OPTIMIZED,
+                                Compress = true,
+                            }
+                        },
                     },
                     DomainNames = new[] { props.DomainName, $"www.{props.DomainName}" },
                     Certificate = props.Certificate,

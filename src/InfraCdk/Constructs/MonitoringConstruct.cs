@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Amazon.CDK;
+using Amazon.CDK.AWS.CloudFront;
 using Amazon.CDK.AWS.CloudWatch;
 using Amazon.CDK.AWS.CloudWatch.Actions;
 using Amazon.CDK.AWS.ECS;
@@ -24,6 +25,18 @@ namespace InfraCdk.Constructs
         /// Có thể set qua: cdk deploy --context notificationEmail=admin@example.com
         /// </summary>
         public string NotificationEmail { get; set; }
+
+        /// <summary>
+        /// Cấu hình environment — dùng để thêm env suffix cho tên resource,
+        /// tránh conflict khi deploy nhiều environment vào cùng AWS account.
+        /// </summary>
+        public EnvironmentConfig EnvConfig { get; set; }
+
+        /// <summary>
+        /// CloudFront Distribution — dùng để hiển thị metric 5XX trên dashboard.
+        /// Nullable — nếu null, CloudFront section sẽ được bỏ qua.
+        /// </summary>
+        public Distribution Distribution { get; set; }
     }
 
     /// <summary>
@@ -45,8 +58,9 @@ namespace InfraCdk.Constructs
                 "AlarmTopic",
                 new TopicProps
                 {
-                    TopicName = "InfraAlarmTopic",
-                    DisplayName = "Infrastructure CloudWatch Alarms",
+                    // #7: Tên có env suffix tránh conflict khi nhiều env cùng account.
+                    TopicName = $"{props.EnvConfig.Suffix}-InfraAlarmTopic",
+                    DisplayName = $"[{props.EnvConfig.Name}] Infrastructure CloudWatch Alarms",
                 }
             );
 
@@ -181,6 +195,36 @@ namespace InfraCdk.Constructs
                 }
             );
 
+            // #11: ECS RunningTaskCount — cần Container Insights bật trên Cluster.
+            // Alarm khi running tasks = 0 → toàn bộ service bị down.
+            var ecsRunningTasksMetric = new Metric(
+                new MetricProps
+                {
+                    Namespace = "ECS/ContainerInsights",
+                    MetricName = "RunningTaskCount",
+                    DimensionsMap = new Dictionary<string, string>
+                    {
+                        { "ClusterName", props.FargateService.Cluster.ClusterName },
+                        { "ServiceName", props.FargateService.ServiceName },
+                    },
+                    Period = Duration.Minutes(1),
+                    Statistic = "Minimum",
+                    Label = "Running Task Count",
+                }
+            );
+
+            // #11: ALB ELB 5XX — khác với Target 5XX.
+            // ELB 5XX = lỗi tầng ALB (timeout, connection issue), không phải từ app.
+            var albElb5xxMetric = props.Alb.MetricHttpCodeElb(
+                HttpCodeElb.ELB_5XX_COUNT,
+                new MetricOptions
+                {
+                    Period = Duration.Minutes(5),
+                    Statistic = "Sum",
+                    Label = "ALB ELB 5XX Count",
+                }
+            );
+
             // ── CloudWatch Alarms ─────────────────────────────────────────────
 
             // [ECS-1] CPU cao → xem xét scale-up hoặc optimize
@@ -188,7 +232,7 @@ namespace InfraCdk.Constructs
                 "EcsCpuHighAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "ECS-CPU-High",
+                    AlarmName = $"{props.EnvConfig.Suffix}-ECS-CPU-High",
                     AlarmDescription =
                         "ECS CPU > 80% trong 15 phút — xem xét scale-up hoặc optimize code",
                     Metric = ecsCpuMetric,
@@ -206,7 +250,7 @@ namespace InfraCdk.Constructs
                 "EcsMemoryHighAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "ECS-Memory-High",
+                    AlarmName = $"{props.EnvConfig.Suffix}-ECS-Memory-High",
                     AlarmDescription =
                         "ECS Memory > 80% trong 15 phút — tăng Task Memory hoặc investigate leak",
                     Metric = ecsMemoryMetric,
@@ -219,12 +263,31 @@ namespace InfraCdk.Constructs
                 notifyOk: true
             );
 
+            // [ECS-3] #11: Zero running tasks — critical, toàn bộ service bị down
+            var ecsZeroTasksAlarm = CreateAlarm(
+                "EcsZeroTasksAlarm",
+                new AlarmProps
+                {
+                    AlarmName = $"{props.EnvConfig.Suffix}-ECS-Zero-Tasks",
+                    AlarmDescription =
+                        "ECS running tasks = 0 — toàn bộ service bị down, cần xử lý ngay!",
+                    Metric = ecsRunningTasksMetric,
+                    Threshold = 1,
+                    EvaluationPeriods = 1,
+                    ComparisonOperator = ComparisonOperator.LESS_THAN_THRESHOLD,
+                    // BREACHING khi không có data → tasks crash và ngừng report
+                    TreatMissingData = TreatMissingData.BREACHING,
+                },
+                alarmAction,
+                notifyOk: true
+            );
+
             // [ALB-1] 5XX errors → ứng dụng đang có lỗi
             var alb5xxAlarm = CreateAlarm(
                 "Alb5xxAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "ALB-5XX-Errors",
+                    AlarmName = $"{props.EnvConfig.Suffix}-ALB-5XX-Errors",
                     AlarmDescription = "ALB nhận > 10 lỗi 5XX trong 5 phút — ứng dụng đang bị lỗi",
                     Metric = alb5xxMetric,
                     Threshold = 10,
@@ -241,7 +304,7 @@ namespace InfraCdk.Constructs
                 "AlbResponseTimeAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "ALB-High-Response-Time",
+                    AlarmName = $"{props.EnvConfig.Suffix}-ALB-High-Response-Time",
                     AlarmDescription =
                         "ALB p99 Response Time > 2s trong 10 phút — bottleneck ở app hoặc DB",
                     Metric = albResponseTimeP99,
@@ -259,7 +322,7 @@ namespace InfraCdk.Constructs
                 "AlbUnhealthyHostAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "ALB-Unhealthy-Hosts",
+                    AlarmName = $"{props.EnvConfig.Suffix}-ALB-Unhealthy-Hosts",
                     AlarmDescription =
                         "ALB phát hiện host unhealthy 2 phút liên tiếp — ECS task đang crash",
                     Metric = albUnhealthyHostMetric,
@@ -272,12 +335,30 @@ namespace InfraCdk.Constructs
                 notifyOk: true
             );
 
+            // [ALB-4] #11: ELB tự sinh 5XX (khác Target 5XX) — lỗi tầng ALB chứ không phải app
+            var albElb5xxAlarm = CreateAlarm(
+                "AlbElb5xxAlarm",
+                new AlarmProps
+                {
+                    AlarmName = $"{props.EnvConfig.Suffix}-ALB-ELB-5XX-Errors",
+                    AlarmDescription =
+                        "ALB (ELB tầng) trả về 5XX — ALB timeout hoặc connection issue, không phải app lỗi",
+                    Metric = albElb5xxMetric,
+                    Threshold = 5,
+                    EvaluationPeriods = 1,
+                    ComparisonOperator = ComparisonOperator.GREATER_THAN_THRESHOLD,
+                    TreatMissingData = TreatMissingData.NOT_BREACHING,
+                },
+                alarmAction,
+                notifyOk: false
+            );
+
             // [RDS-1] Aurora CPU cao
             var rdsCpuAlarm = CreateAlarm(
                 "RdsCpuHighAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "Aurora-CPU-High",
+                    AlarmName = $"{props.EnvConfig.Suffix}-Aurora-CPU-High",
                     AlarmDescription =
                         "Aurora CPU > 80% trong 15 phút — xem xét upgrade instance hoặc read replica",
                     Metric = rdsCpuMetric,
@@ -295,7 +376,7 @@ namespace InfraCdk.Constructs
                 "RdsConnectionsHighAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "Aurora-Connections-High",
+                    AlarmName = $"{props.EnvConfig.Suffix}-Aurora-Connections-High",
                     AlarmDescription =
                         "Aurora DatabaseConnections > 100 — xem xét tối ưu connection pool",
                     Metric = rdsConnectionsMetric,
@@ -313,7 +394,7 @@ namespace InfraCdk.Constructs
                 "RdsFreeMemoryLowAlarm",
                 new AlarmProps
                 {
-                    AlarmName = "Aurora-Low-Freeable-Memory",
+                    AlarmName = $"{props.EnvConfig.Suffix}-Aurora-Low-Freeable-Memory",
                     AlarmDescription =
                         "Aurora FreeableMemory < 200 MB — nguy cơ OOM, xem xét upgrade instance",
                     Metric = rdsFreeMemoryMetric,
@@ -327,12 +408,14 @@ namespace InfraCdk.Constructs
             );
 
             // ── CloudWatch Dashboard ──────────────────────────────────────────
+            // #7: DashboardName có env suffix để phân biệt giữa Dev/Stg/Prod.
+            var dashboardName = $"{props.EnvConfig.Suffix}-InfraOverview";
             var dashboard = new Dashboard(
                 this,
                 "InfraDashboard",
                 new DashboardProps
                 {
-                    DashboardName = "InfraOverview",
+                    DashboardName = dashboardName,
                     DefaultInterval = Duration.Hours(3),
                 }
             );
@@ -353,7 +436,7 @@ namespace InfraCdk.Constructs
                         Title = "ECS CPU Utilization (%)",
                         Left = new IMetric[] { ecsCpuMetric },
                         LeftAnnotations = new[] { ecsCpuAlarm.ToAnnotation() },
-                        Width = 12,
+                        Width = 8,
                         Height = 6,
                     }
                 ),
@@ -363,7 +446,18 @@ namespace InfraCdk.Constructs
                         Title = "ECS Memory Utilization (%)",
                         Left = new IMetric[] { ecsMemoryMetric },
                         LeftAnnotations = new[] { ecsMemoryAlarm.ToAnnotation() },
-                        Width = 12,
+                        Width = 8,
+                        Height = 6,
+                    }
+                ),
+                // #11: Running Task Count — phát hiện khi tất cả tasks crash
+                new GraphWidget(
+                    new GraphWidgetProps
+                    {
+                        Title = "ECS Running Task Count",
+                        Left = new IMetric[] { ecsRunningTasksMetric },
+                        LeftAnnotations = new[] { ecsZeroTasksAlarm.ToAnnotation() },
+                        Width = 8,
                         Height = 6,
                     }
                 ),
@@ -380,9 +474,9 @@ namespace InfraCdk.Constructs
                     new GraphWidgetProps
                     {
                         Title = "ALB HTTP Error Counts (5min sum)",
-                        Left = new IMetric[] { alb5xxMetric, alb4xxMetric },
+                        Left = new IMetric[] { alb5xxMetric, alb4xxMetric, albElb5xxMetric },
                         LeftAnnotations = new[] { alb5xxAlarm.ToAnnotation() },
-                        Width = 12,
+                        Width = 8,
                         Height = 6,
                     }
                 ),
@@ -392,7 +486,17 @@ namespace InfraCdk.Constructs
                         Title = "ALB Target Response Time (s)",
                         Left = new IMetric[] { albResponseTimeP99, albResponseTimeP50 },
                         LeftAnnotations = new[] { albResponseTimeAlarm.ToAnnotation() },
-                        Width = 12,
+                        Width = 8,
+                        Height = 6,
+                    }
+                ),
+                new GraphWidget(
+                    new GraphWidgetProps
+                    {
+                        Title = "ALB Unhealthy Hosts",
+                        Left = new IMetric[] { albUnhealthyHostMetric },
+                        LeftAnnotations = new[] { albUnhealthyHostAlarm.ToAnnotation() },
+                        Width = 8,
                         Height = 6,
                     }
                 ),
@@ -444,7 +548,7 @@ namespace InfraCdk.Constructs
                 new CfnOutputProps
                 {
                     Value =
-                        $"https://{Stack.Of(this).Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=InfraOverview",
+                        $"https://{Stack.Of(this).Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name={dashboardName}",
                     Description = "CloudWatch Dashboard — xem tổng quan toàn bộ hệ thống",
                 }
             );

@@ -74,6 +74,11 @@ namespace InfraCdk
             // EnvConfig đến từ props — xem EnvironmentConfig.cs để biết các preset
             var envConfig = props?.EnvConfig ?? EnvironmentConfig.Development();
 
+            // imageTag: dùng để chỉ định Docker image version trên ECR.
+            // Set qua CLI: cdk deploy --context imageTag=v1.2.3
+            // Mặc định "latest" — nhớ push image lên ECR trước khi deploy.
+            var imageTag = this.Node.TryGetContext("imageTag") as string ?? "latest";
+
             // ── 1. Networking ─────────────────────────────────────────────────
             var networking = new NetworkingConstruct(this, "Networking");
 
@@ -125,9 +130,10 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     EcsSg = securityGroups.EcsSg,
-                    DbSecret = database.AuroraCluster.Secret, // ISecret — auto-grant execution role
-                    DbProxyEndpoint = database.RdsProxy.Endpoint, // string token → env var DB_HOST
-                    EnvConfig = envConfig, // #7: scale-down behavior
+                    DbSecret = database.AuroraCluster.Secret,
+                    DbProxyEndpoint = database.RdsProxy.Endpoint,
+                    EnvConfig = envConfig,
+                    ImageTag = imageTag, // #9: image tag từ ECR, set qua --context imageTag=<tag>
                 }
             );
 
@@ -168,8 +174,8 @@ namespace InfraCdk
                     HostedZone = hostedZone,
                     CustomHeaderName = loadBalancer.CustomHeaderName,
                     CustomHeaderValue = loadBalancer.CustomHeaderValue,
-                    // WAF ARN được truyền từ WafStack qua CrossRegionReferences
                     WafArn = props?.WafArn,
+                    StaticBucket = storage.StaticBucket, // #10: S3 behavior /static/*
                 }
             );
 
@@ -206,11 +212,13 @@ namespace InfraCdk
                     TargetGroup = ecs.TargetGroup,
                     AuroraCluster = database.AuroraCluster,
                     NotificationEmail = notificationEmail,
+                    EnvConfig = envConfig, // #7: env prefix cho tên resource
+                    Distribution = cloudFront.Distribution, // #11: CloudFront metrics
                 }
             );
 
             // Ngăn compiler cảnh báo unused variable
-            _ = cloudFront;
+            // cloudFront đã được dùng bên trên (cloudFront.Distribution)
             _ = bastion;
         }
     }

@@ -1,5 +1,6 @@
 using Amazon.CDK;
 using Amazon.CDK.AWS.EC2;
+using Amazon.CDK.AWS.Logs;
 
 namespace InfraCdk
 {
@@ -78,6 +79,31 @@ namespace InfraCdk
         /// <summary>Maximum tasks ban đêm. Dev/Stg=0, Prod=1</summary>
         public int EcsNightMaxCapacity { get; init; }
 
+        // ── Logging ──────────────────────────────────────────────────────────
+        /// <summary>
+        /// Thời gian giữ log ECS CloudWatch. Dev=1 tuần, Stg=2 tuần, Prod=1 tháng.
+        /// </summary>
+        public RetentionDays LogRetentionDays { get; init; }
+
+        // ── Scheduled Scaling ─────────────────────────────────────────────────
+        /// <summary>
+        /// Giờ UTC để scale-down ban đêm. Default "15" = 22:00 VN (UTC+7).
+        /// Override khi deploy sang region khác timezone.
+        /// </summary>
+        public string ScaleDownHourUtc { get; init; }
+
+        /// <summary>
+        /// Giờ UTC để scale-up buổi sáng. Default "0" = 07:00 VN (UTC+7).
+        /// </summary>
+        public string ScaleUpHourUtc { get; init; }
+
+        // ── ECR ──────────────────────────────────────────────────────────────
+        /// <summary>
+        /// DESTROY: xóa ECR repo khi cdk destroy (dev) |
+        /// RETAIN: giữ lại images sau khi stack bị xóa (stg, prod)
+        /// </summary>
+        public RemovalPolicy EcrRemovalPolicy { get; init; }
+
         // ── Factory Methods ──────────────────────────────────────────────────
 
         /// <summary>
@@ -118,6 +144,10 @@ namespace InfraCdk
                 EcsMaxCapacity = 4, // Giới hạn thấp để tránh chạy quá nhiều task
                 EcsNightMinCapacity = 0, // Tắt hoàn toàn ban đêm
                 EcsNightMaxCapacity = 0,
+                LogRetentionDays = RetentionDays.ONE_WEEK,
+                ScaleDownHourUtc = "15", // 22:00 VN (UTC+7)
+                ScaleUpHourUtc = "0", // 07:00 VN (UTC+7)
+                EcrRemovalPolicy = RemovalPolicy.DESTROY,
             };
 
         /// <summary>
@@ -147,6 +177,10 @@ namespace InfraCdk
                 EcsMaxCapacity = 4,
                 EcsNightMinCapacity = 0, // Staging tắt ban đêm
                 EcsNightMaxCapacity = 0,
+                LogRetentionDays = RetentionDays.TWO_WEEKS,
+                ScaleDownHourUtc = "15",
+                ScaleUpHourUtc = "0",
+                EcrRemovalPolicy = RemovalPolicy.RETAIN,
             };
 
         /// <summary>
@@ -175,6 +209,10 @@ namespace InfraCdk
                 EcsMaxCapacity = 8, // Scale up đến 8 khi peak
                 EcsNightMinCapacity = 1, // Production: KHÔNG BAO GIỜ về 0
                 EcsNightMaxCapacity = 1,
+                LogRetentionDays = RetentionDays.ONE_MONTH,
+                ScaleDownHourUtc = "15",
+                ScaleUpHourUtc = "0",
+                EcrRemovalPolicy = RemovalPolicy.RETAIN,
             };
     }
 }
