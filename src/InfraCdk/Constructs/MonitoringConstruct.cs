@@ -215,7 +215,7 @@ namespace InfraCdk.Constructs
 
             // #11: ALB ELB 5XX — khác với Target 5XX.
             // ELB 5XX = lỗi tầng ALB (timeout, connection issue), không phải từ app.
-            var albElb5xxMetric = props.Alb.MetricHttpCodeElb(
+            var albElb5xxMetric = props.Alb.Metrics.HttpCodeElb(
                 HttpCodeElb.ELB_5XX_COUNT,
                 new MetricOptions
                 {

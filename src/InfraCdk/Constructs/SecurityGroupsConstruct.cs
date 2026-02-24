@@ -1,5 +1,6 @@
 using Amazon.CDK.AWS.EC2;
 using Constructs;
+using InfraCdk;
 
 namespace InfraCdk.Constructs
 {
@@ -21,7 +22,12 @@ namespace InfraCdk.Constructs
         public SecurityGroup EcsSg { get; }
         public SecurityGroup RdsSg { get; }
 
-        public SecurityGroupsConstruct(Construct scope, string id, Vpc vpc)
+        public SecurityGroupsConstruct(
+            Construct scope,
+            string id,
+            Vpc vpc,
+            EnvironmentConfig envConfig
+        )
             : base(scope, id)
         {
             // ─────────────────────────────────────────────────────────────────
@@ -99,17 +105,26 @@ namespace InfraCdk.Constructs
             // ECS outbound → RDS port 3306 (MySQL qua RDS Proxy)
             EcsSg.AddEgressRule(RdsSg, Port.Tcp(3306), "ECS → RDS MySQL");
 
-            // ECS outbound → VPC CIDR port 443 (Interface Endpoints: ECR, CloudWatch Logs, SecretsManager)
-            // Dùng VPC CIDR thay vì SecurityGroup của endpoint để tránh circular dependency
-            EcsSg.AddEgressRule(
-                Peer.Ipv4(vpc.VpcCidrBlock),
-                Port.Tcp(443),
-                "ECS → VPC Endpoints (ECR pull image, CloudWatch Logs, SecretsManager)"
-            );
-
-            // ECS outbound → S3 port 443 (Gateway Endpoint — không cần SG rule, nhưng thêm để rõ ràng)
-            // Gateway Endpoints không dùng Security Group, nhưng traffic vẫn cần port 443
-            // Route table tự xử lý, dòng này chỉ là documentation
+            if (envConfig.UseVpcEndpoints)
+            {
+                // VPC Endpoints mode (Stg/Prod): chỉ allow HTTPS đến VPC CIDR
+                // — Least privilege: ECS chỉ reach được Interface Endpoints trong VPC
+                EcsSg.AddEgressRule(
+                    Peer.Ipv4(vpc.VpcCidrBlock),
+                    Port.Tcp(443),
+                    "ECS → VPC Endpoints (ECR, CloudWatch Logs, SecretsManager)"
+                );
+            }
+            else
+            {
+                // NAT Gateway mode (Dev): allow HTTPS ra internet
+                // — Traffic đi qua NAT GW để reach ECR/CloudWatch/SM trên public internet
+                EcsSg.AddEgressRule(
+                    Peer.AnyIpv4(),
+                    Port.Tcp(443),
+                    "ECS → Internet qua NAT GW (ECR, CloudWatch Logs, SecretsManager)"
+                );
+            }
         }
     }
 }

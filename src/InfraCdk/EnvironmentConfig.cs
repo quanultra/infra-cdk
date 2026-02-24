@@ -104,6 +104,32 @@ namespace InfraCdk
         /// </summary>
         public RemovalPolicy EcrRemovalPolicy { get; init; }
 
+        // ── Database (Reader) ─────────────────────────────────────────────────
+        /// <summary>
+        /// Số lượng Aurora Reader instances.
+        /// Dev=0: không tạo reader (tiết kiệm ~$29/tháng, Writer cũng serve reads).
+        /// Stg=1, Prod=1: tăng khả năng đọc và failover tự động.
+        /// </summary>
+        public int AuroraReaderCount { get; init; }
+
+        // ── Networking ────────────────────────────────────────────────────────
+        /// <summary>
+        /// Khi true: dùng VPC Interface Endpoints (Stg/Prod — an toàn, không qua internet).
+        /// Khi false: dùng 1 NAT Gateway (Dev — rẻ hơn khi traffic thấp).
+        /// Chi phí so sánh (ap-northeast-1):
+        ///   4 Interface Endpoints × 2 AZ ≈ $58/tháng (fixed hourly)
+        ///   1 NAT Gateway ≈ $32/tháng + data transfer
+        /// </summary>
+        public bool UseVpcEndpoints { get; init; }
+
+        // ── Bastion ───────────────────────────────────────────────────────────
+        /// <summary>
+        /// Khi true: tạo EC2 Bastion Host để kết nối DB từ local qua SSM.
+        /// Dev/Stg=false: không cần Bastion, giảm attack surface và chi phí EC2.
+        /// Prod=true: DBA cần Bastion để truy cập DB production an toàn.
+        /// </summary>
+        public bool BastionEnabled { get; init; }
+
         // ── Factory Methods ──────────────────────────────────────────────────
 
         /// <summary>
@@ -148,6 +174,12 @@ namespace InfraCdk
                 ScaleDownHourUtc = "15", // 22:00 VN (UTC+7)
                 ScaleUpHourUtc = "0", // 07:00 VN (UTC+7)
                 EcrRemovalPolicy = RemovalPolicy.DESTROY,
+                // #6: Dev không cần Reader — không có read workload, tiết kiệm ~$29/tháng
+                AuroraReaderCount = 0,
+                // #4: Dev dùng NAT Gateway 1 AZ (rẻ hơn 4 Interface Endpoints khi traffic thấp)
+                UseVpcEndpoints = false,
+                // #5: Dev không cần Bastion — dùng ECS Exec hoặc port-forward trực tiếp
+                BastionEnabled = false,
             };
 
         /// <summary>
@@ -181,6 +213,12 @@ namespace InfraCdk
                 ScaleDownHourUtc = "15",
                 ScaleUpHourUtc = "0",
                 EcrRemovalPolicy = RemovalPolicy.RETAIN,
+                // #6: Staging có Reader để test failover trước khi lên Prod
+                AuroraReaderCount = 1,
+                // #4: Staging dùng VPC Endpoints để mirror sát môi trường Prod
+                UseVpcEndpoints = true,
+                // #5: Staging không cần Bastion trong tự động hóa CI/CD
+                BastionEnabled = false,
             };
 
         /// <summary>
@@ -213,6 +251,12 @@ namespace InfraCdk
                 ScaleDownHourUtc = "15",
                 ScaleUpHourUtc = "0",
                 EcrRemovalPolicy = RemovalPolicy.RETAIN,
+                // #6: Prod cần Reader để tăng khả năng đọc và failover tự động
+                AuroraReaderCount = 1,
+                // #4: Prod dùng VPC Endpoints — an toàn, không qua internet
+                UseVpcEndpoints = true,
+                // #5: Prod cần Bastion để DBA truy cập DB an toàn qua SSM
+                BastionEnabled = true,
             };
     }
 }

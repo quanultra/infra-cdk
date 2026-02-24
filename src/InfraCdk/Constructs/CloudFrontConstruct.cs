@@ -58,8 +58,9 @@ namespace InfraCdk.Constructs
                 }
             );
 
-            // #10: S3 origin cho static assets — CDK tự động tạo OAI và grant s3:GetObject
-            var s3Origin = new S3Origin(props.StaticBucket);
+            // #10: S3 origin cho static assets — S3BucketOrigin tự tạo OAC (thay S3Origin obsolete)
+            // S3BucketOrigin dùng Origin Access Control (OAC) thay vì OAI (deprecated)
+            var s3Origin = S3BucketOrigin.WithOriginAccessControl(props.StaticBucket);
 
             Distribution = new Distribution(
                 this,

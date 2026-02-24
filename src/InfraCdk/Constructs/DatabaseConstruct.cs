@@ -78,29 +78,15 @@ namespace InfraCdk.Constructs
                             PubliclyAccessible = false,
                         }
                     ),
-                    Readers = new IClusterInstance[]
-                    {
-                        ClusterInstance.Provisioned(
-                            "reader",
-                            new ProvisionedClusterInstanceProps
-                            {
-                                InstanceType = Amazon.CDK.AWS.EC2.InstanceType.Of(
-                                    props.EnvConfig.AuroraInstanceClass,
-                                    props.EnvConfig.AuroraInstanceSize
-                                ),
-                                PubliclyAccessible = false,
-                            }
-                        ),
-                    },
+                    // #6: Readers = 0 cho Dev — không có read workload thực tế.
+                    // Aurora hoạt động bình thường với chỉ Writer, Writer cũng serve reads.
+                    // Stg/Prod = 1 Reader: tăng HA và failover tự động.
+                    Readers = BuildReaderInstances(props.EnvConfig),
                     Vpc = props.Vpc,
                     VpcSubnets = privateSubnets,
                     SecurityGroups = new[] { props.RdsSg },
                     SubnetGroup = rdsSubnetGroup,
                     DefaultDatabaseName = "mydatabase",
-                    // Aurora instance type từ EnvironmentConfig:
-                    //   Dev:     t3.small  — giảm ~50% chi phí so với t3.medium
-                    //   Staging: t3.small  — staging không cần hiệu năng cao
-                    //   Prod:    t3.medium — đủ mạnh cho production traffic
                     RemovalPolicy = props.EnvConfig.DbRemovalPolicy,
                 }
             );
@@ -163,6 +149,36 @@ namespace InfraCdk.Constructs
                     ExportName = "RDSProxyEndpoint",
                 }
             );
+        }
+
+        /// <summary>
+        /// Tạo danh sách Aurora Reader instances dựa trên AuroraReaderCount trong EnvironmentConfig.
+        /// Dev: 0 readers → null (Aurora hoạt động bình thường với chỉ Writer).
+        /// Stg/Prod: 1 reader → tăng HA và read throughput.
+        /// </summary>
+        private static IClusterInstance[] BuildReaderInstances(EnvironmentConfig envConfig)
+        {
+            if (envConfig.AuroraReaderCount <= 0)
+                return null; // Aurora chỉ có Writer là hoàn toàn hợp lệ
+
+            var readers = new System.Collections.Generic.List<IClusterInstance>();
+            for (int i = 0; i < envConfig.AuroraReaderCount; i++)
+            {
+                readers.Add(
+                    ClusterInstance.Provisioned(
+                        $"reader{i + 1}",
+                        new ProvisionedClusterInstanceProps
+                        {
+                            InstanceType = Amazon.CDK.AWS.EC2.InstanceType.Of(
+                                envConfig.AuroraInstanceClass,
+                                envConfig.AuroraInstanceSize
+                            ),
+                            PubliclyAccessible = false,
+                        }
+                    )
+                );
+            }
+            return readers.ToArray();
         }
     }
 }

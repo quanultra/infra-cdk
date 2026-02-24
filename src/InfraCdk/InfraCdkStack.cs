@@ -79,14 +79,23 @@ namespace InfraCdk
             // Mặc định "latest" — nhớ push image lên ECR trước khi deploy.
             var imageTag = this.Node.TryGetContext("imageTag") as string ?? "latest";
 
-            // ── 1. Networking ─────────────────────────────────────────────────
-            var networking = new NetworkingConstruct(this, "Networking");
+            // ── 1. Networking ────────────────────────────────────────────────────────────
+            // #4: UseVpcEndpoints được cấu hình trong EnvironmentConfig:
+            //   Dev  → NAT Gateway (~$32/th, rẻ hơn khi traffic thấp)
+            //   Stg/Prod → VPC Interface Endpoints (~$58/th, bảo mật hơn)
+            var networking = new NetworkingConstruct(
+                this,
+                "Networking",
+                new NetworkingConstructProps { EnvConfig = envConfig }
+            );
 
-            // ── 2. Security Groups ────────────────────────────────────────────
+            // ── 2. Security Groups ──────────────────────────────────────────────────────
+            // #4: EnvConfig xác định ECS egress: VPC CIDR (endpoints) vs AnyIPv4 (NAT GW)
             var securityGroups = new SecurityGroupsConstruct(
                 this,
                 "SecurityGroups",
-                networking.Vpc
+                networking.Vpc,
+                envConfig
             );
 
             // ── 3. Storage ────────────────────────────────────────────────────
@@ -117,7 +126,7 @@ namespace InfraCdk
                 }
             );
 
-            // ── 5. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
+            // 5. ECS (Cluster + Fargate Service + Target Group + Auto Scaling)
             // Nhận DbSecret → CDK tự grant Task Execution Role quyền GetSecretValue
             // Nhận DbProxyEndpoint → inject vào container làm env var DB_HOST
             // IsProduction → scale-down: production giữ min 1 task, dev về 0
@@ -179,23 +188,28 @@ namespace InfraCdk
                 }
             );
 
-            // ── 9. Bastion Host (kết nối DB từ local qua SSM Port Forwarding) ───
-            var bastion = new BastionConstruct(
-                this,
-                "Bastion",
-                new BastionConstructProps
-                {
-                    Vpc = networking.Vpc,
-                    PublicSubnet = networking.PublicSubnet1,
-                }
-            );
+            // ── 9. Bastion Host (kết nối DB từ local qua SSM Port Forwarding) ────────────
+            // #5: Chỉ tạo Bastion khi BastionEnabled=true (Prod only).
+            // Dev/Stg không cần — tiết kiệm EC2 chi phí và giảm attack surface.
+            if (envConfig.BastionEnabled)
+            {
+                var bastion = new BastionConstruct(
+                    this,
+                    "Bastion",
+                    new BastionConstructProps
+                    {
+                        Vpc = networking.Vpc,
+                        PublicSubnet = networking.PublicSubnet1,
+                    }
+                );
 
-            // Cho phép Bastion kết nối vào RDS (qua RDS Proxy port 3306)
-            securityGroups.RdsSg.AddIngressRule(
-                bastion.SecurityGroup,
-                Port.Tcp(3306),
-                "Allow MySQL from Bastion Host (SSM Port Forwarding)"
-            );
+                // Cho phép Bastion kết nối vào RDS (qua RDS Proxy port 3306)
+                securityGroups.RdsSg.AddIngressRule(
+                    bastion.SecurityGroup,
+                    Port.Tcp(3306),
+                    "Allow MySQL from Bastion Host (SSM Port Forwarding)"
+                );
+            }
 
             // ── 10. Monitoring & Alerting (CloudWatch Alarms + Dashboard) ─────
             // notificationEmail: set qua cdk deploy --context notificationEmail=admin@example.com
@@ -216,10 +230,6 @@ namespace InfraCdk
                     Distribution = cloudFront.Distribution, // #11: CloudFront metrics
                 }
             );
-
-            // Ngăn compiler cảnh báo unused variable
-            // cloudFront đã được dùng bên trên (cloudFront.Distribution)
-            _ = bastion;
         }
     }
 }

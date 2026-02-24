@@ -122,7 +122,9 @@ namespace InfraCdk.Constructs
                 {
                     Vpc = props.Vpc,
                     ClusterName = $"{props.EnvConfig.Suffix}-ECSCluster",
-                    ContainerInsights = true, // Cần cho alarm ECS-Zero-Tasks (RunningTaskCount metric)
+                    // ContainerInsightsV2 dùng enum ContainerInsights (khác với bool ContainerInsights cũ)
+                    // Cần để lấy RunningTaskCount metric cho alarm ECS-Zero-Tasks
+                    ContainerInsightsV2 = Amazon.CDK.AWS.ECS.ContainerInsights.ENABLED,
                 }
             );
 
