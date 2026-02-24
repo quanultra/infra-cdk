@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Amazon.CDK;
 using Amazon.CDK.AWS.ApplicationAutoScaling;
 using Amazon.CDK.AWS.EC2;
+using Amazon.CDK.AWS.ECR;
 using Amazon.CDK.AWS.ECS;
 using Amazon.CDK.AWS.ElasticLoadBalancingV2;
 using Amazon.CDK.AWS.Logs;
@@ -33,11 +34,18 @@ namespace InfraCdk.Constructs
         public string DbProxyEndpoint { get; set; }
 
         /// <summary>
-        /// true = production: scale-down ban đêm giữ lại tối thiểu 1 task (không bao giờ về 0).
-        /// false = dev/test: scale-down về 0 task để tiết kiệm chi phí hoàn toàn.
-        /// Set qua: cdk deploy --context environment=production
+        /// Cấu hình theo environment — xác định ECS scaling values, desired count.
+        /// Được tạo từ EnvironmentConfig.FromName() trong InfraCdkStack.
         /// </summary>
-        public bool IsProduction { get; set; } = false;
+        public EnvironmentConfig EnvConfig { get; set; }
+
+        /// <summary>
+        /// Tag của Docker image trên ECR. Truyền qua CLI:
+        ///   cdk deploy --context imageTag=v1.2.3
+        /// Mặc định "latest" — dùng cho lần deploy đầu tiên.
+        /// ⚠️ Phải push image lên ECR trước khi deploy ECS service.
+        /// </summary>
+        public string ImageTag { get; set; } = "latest";
     }
 
     /// <summary>
@@ -53,23 +61,69 @@ namespace InfraCdk.Constructs
         public EcsConstruct(Construct scope, string id, EcsConstructProps props)
             : base(scope, id)
         {
+            // --- ECR Repository ---
+            // #9: Tạo ECR repo trong CDK thay vì dùng FromAsset (không CI/CD friendly).
+            // ⚠️ Phải push image trước khi deploy ECS:
+            //   docker build -t <ECR_URI>:<tag> .
+            //   aws ecr get-login-password | docker login --username AWS --password-stdin <ECR_URI>
+            //   docker push <ECR_URI>:<tag>
+            var ecrRepo = new Repository(
+                this,
+                "AppEcrRepository",
+                new RepositoryProps
+                {
+                    RepositoryName = $"{props.EnvConfig.Suffix.ToLower()}-app",
+                    ImageScanOnPush = true, // Tự động scan CVE khi push image
+                    LifecycleRules = new[]
+                    {
+                        new LifecycleRule
+                        {
+                            MaxImageCount = 10,
+                            TagStatus = TagStatus.ANY,
+                            Description = "Giữ tối đa 10 images, xóa cũ hơn",
+                        },
+                    },
+                    RemovalPolicy = props.EnvConfig.EcrRemovalPolicy,
+                }
+            );
+
+            new CfnOutput(
+                this,
+                "EcrRepositoryUri",
+                new CfnOutputProps
+                {
+                    Value = ecrRepo.RepositoryUri,
+                    Description =
+                        "ECR URI — push image: docker push <URI>:<tag> rồi deploy với --context imageTag=<tag>",
+                    ExportName = $"{props.EnvConfig.Suffix}-EcrRepositoryUri",
+                }
+            );
+
             // --- CloudWatch Log Group ---
+            // #7: Tên log group có env suffix để tránh conflict khi deploy nhiều env cùng account.
+            // #8: Retention đọc từ EnvironmentConfig: Dev=1W, Stg=2W, Prod=1M.
             var logGroup = new LogGroup(
                 this,
                 "FargateLogGroup",
                 new LogGroupProps
                 {
-                    LogGroupName = "/ecs/fargate-service-logs",
-                    Retention = RetentionDays.ONE_WEEK,
+                    LogGroupName = $"/ecs/{props.EnvConfig.Suffix.ToLower()}-fargate-service-logs",
+                    Retention = props.EnvConfig.LogRetentionDays,
                     RemovalPolicy = RemovalPolicy.DESTROY,
                 }
             );
 
             // --- ECS Cluster ---
+            // #7: ClusterName có env suffix, ContainerInsights bật để có RunningTaskCount metric.
             Cluster = new Cluster(
                 this,
                 "ECSCluster",
-                new ClusterProps { Vpc = props.Vpc, ClusterName = "ECSCluster" }
+                new ClusterProps
+                {
+                    Vpc = props.Vpc,
+                    ClusterName = $"{props.EnvConfig.Suffix}-ECSCluster",
+                    ContainerInsights = true, // Cần cho alarm ECS-Zero-Tasks (RunningTaskCount metric)
+                }
             );
 
             // --- Fargate Task Definition ---
@@ -83,8 +137,8 @@ namespace InfraCdk.Constructs
                 "AppContainer",
                 new ContainerDefinitionOptions
                 {
-                    // Build image từ local và push lên ECR Private — không phụ thuộc Docker Hub
-                    Image = ContainerImage.FromAsset("src/InfraCdk/docker-app"),
+                    // #9: Image từ ECR repo được tạo ở trên — hỗ trợ CI/CD và rollback qua imageTag.
+                    Image = ContainerImage.FromEcrRepository(ecrRepo, props.ImageTag),
                     PortMappings = new[] { new PortMapping { ContainerPort = 80 } },
                     Logging = LogDrivers.AwsLogs(
                         new AwsLogDriverProps { LogGroup = logGroup, StreamPrefix = "fargate" }
@@ -167,10 +221,11 @@ namespace InfraCdk.Constructs
                 new FargateServiceProps
                 {
                     Cluster = Cluster,
-                    ServiceName = "MyFargateService",
+                    // #7: ServiceName có env suffix tránh conflict multi-env trong cùng account.
+                    ServiceName = $"{props.EnvConfig.Suffix}-FargateService",
                     TaskDefinition = taskDefinition,
                     AssignPublicIp = false,
-                    DesiredCount = 2,
+                    DesiredCount = props.EnvConfig.EcsDesiredCount, // #3 fix: dùng từ EnvironmentConfig
                     SecurityGroups = new[] { props.EcsSg },
                     VpcSubnets = new SubnetSelection
                     {
@@ -198,10 +253,15 @@ namespace InfraCdk.Constructs
             FargateService.AttachToApplicationTargetGroup(TargetGroup);
 
             // --- Auto Scaling: CPU-Based ---
-            // Giới hạn tổng thể: min=2 (khi đang hoạt động ban ngày), max=8 (peak load)
-            // Lưu ý: Scheduled actions bên dưới sẽ OVERRIDE giới hạn này tạm thời
+            // Giới hạn tổng thể theo EnvironmentConfig:
+            //   Dev:  Min=1, Max=4 | Stg: Min=1, Max=4 | Prod: Min=2, Max=8
+            // Scheduled actions bên dưới sẽ OVERRIDE giới hạn này vào ban đêm
             var scaling = FargateService.AutoScaleTaskCount(
-                new EnableScalingProps { MinCapacity = 2, MaxCapacity = 8 }
+                new EnableScalingProps
+                {
+                    MinCapacity = props.EnvConfig.EcsMinCapacity,
+                    MaxCapacity = props.EnvConfig.EcsMaxCapacity,
+                }
             );
 
             scaling.ScaleOnCpuUtilization(
@@ -215,36 +275,33 @@ namespace InfraCdk.Constructs
             );
 
             // --- Auto Scaling: Schedule ---
-            // Tắt ECS ban đêm để tiết kiệm chi phí (22:00 VN = 15:00 UTC)
-            // Production (IsProduction=true):
-            //   → MinCapacity=1 — luôn giữ tối thiểu 1 task để xử lý emergency request
-            //   → MaxCapacity=1 — giới hạn scale khi traffic đêm thấp
-            //   → Tiết kiệm ~50% so với ban ngày (1 task thay vì 2 task)
-            // Dev/Test (IsProduction=false):
-            //   → MinCapacity=0, MaxCapacity=0 — tắt hoàn toàn, tiết kiệm 100% Fargate cost đêm
-            //   → Rủi ro chấp nhận được: nếu scale-up sai, chỉ ảnh hưởng dev env
-            var nightMinCapacity = props.IsProduction ? 1 : 0;
-            var nightMaxCapacity = props.IsProduction ? 1 : 0;
-
+            // #13: Giờ scale đọc từ EnvironmentConfig — linh hoạt theo region/timezone.
+            //   Dev/Stg → 0 tasks ban đêm — tắt hoàn toàn, tiết kiệm 100% Fargate cost
+            //   Prod    → 1 task ban đêm — luôn có task sẵn sàng, tránh cold start hoàn toàn
             scaling.ScaleOnSchedule(
                 "ScaleDownAtNight",
                 new ScalingSchedule
                 {
-                    Schedule = Schedule.Cron(new CronOptions { Hour = "15", Minute = "0" }),
-                    MinCapacity = nightMinCapacity,
-                    MaxCapacity = nightMaxCapacity,
+                    // #13: ScaleDownHourUtc từ EnvironmentConfig (default "15" = 22:00 VN UTC+7)
+                    Schedule = Schedule.Cron(
+                        new CronOptions { Hour = props.EnvConfig.ScaleDownHourUtc, Minute = "0" }
+                    ),
+                    MinCapacity = props.EnvConfig.EcsNightMinCapacity,
+                    MaxCapacity = props.EnvConfig.EcsNightMaxCapacity,
                 }
             );
 
-            // Bật lại ECS lúc 07:00 VN (00:00 UTC)
-            // Min=2 để đảm bảo high availability ngay khi scale-up
+            // Bật lại ECS buổi sáng
             scaling.ScaleOnSchedule(
                 "ScaleUpInMorning",
                 new ScalingSchedule
                 {
-                    Schedule = Schedule.Cron(new CronOptions { Hour = "0", Minute = "0" }),
-                    MinCapacity = 2,
-                    MaxCapacity = 8,
+                    // #13: ScaleUpHourUtc từ EnvironmentConfig (default "0" = 07:00 VN UTC+7)
+                    Schedule = Schedule.Cron(
+                        new CronOptions { Hour = props.EnvConfig.ScaleUpHourUtc, Minute = "0" }
+                    ),
+                    MinCapacity = props.EnvConfig.EcsMinCapacity,
+                    MaxCapacity = props.EnvConfig.EcsMaxCapacity,
                 }
             );
         }

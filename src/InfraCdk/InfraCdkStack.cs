@@ -17,6 +17,12 @@ namespace InfraCdk
         /// Được truyền vào đây qua CrossRegionReferences (CDK dùng SSM Parameter Store).
         /// </summary>
         public string WafArn { get; set; }
+
+        /// <summary>
+        /// Cấu hình theo environment — được tạo từ Program.cs qua EnvironmentConfig.FromName().
+        /// Chứa toàn bộ tham số thay đổi theo environment (Dev / Stg / Prod).
+        /// </summary>
+        public EnvironmentConfig EnvConfig { get; set; }
     }
 
     /// <summary>
@@ -47,14 +53,31 @@ namespace InfraCdk
         internal InfraCdkStack(Construct scope, string id, InfraCdkStackProps props = null)
             : base(scope, id, props)
         {
-            const string domainName = "example.com";
+            // ── Đọc Project Configuration từ CDK Context ──────────────────────
+            // Environment config được nhận qua props (xem Program.cs) — không đọc lại ở đây.
+            // domainName và staticBucketName vẫn đọc từ context để hỗ trợ override linh hoạt.
 
-            // Đọc environment từ CDK context để quyết định RemovalPolicy
-            // Dev/Test (default): cdk deploy
-            // Production:         cdk deploy --context environment=production
-            //                     hoặc cdk.json: "context": { "environment": "production" }
-            var environment = this.Node.TryGetContext("environment") as string;
-            var isProduction = environment?.ToLower() == "production";
+            // domainName: BẮT BUỘC — dùng cho Route53, ACM Certificate, CloudFront
+            var domainName = this.Node.TryGetContext("domainName") as string;
+            if (string.IsNullOrWhiteSpace(domainName))
+                throw new System.Exception(
+                    "CDK context 'domainName' chưa được set.\n"
+                        + "Cách fix:\n"
+                        + "  1. Thêm vào cdk.json: \"domainName\": \"yourdomain.com\"\n"
+                        + "  2. Hoặc CLI: cdk deploy --context domainName=yourdomain.com"
+                );
+
+            // staticBucketName: TÙY CHỌN — nếu không set, CDK tự sinh tên unique
+            // Lưu ý: tên bucket phải unique toàn cầu → chỉ nên set nếu cần tên cố định
+            var staticBucketName = this.Node.TryGetContext("staticBucketName") as string;
+
+            // EnvConfig đến từ props — xem EnvironmentConfig.cs để biết các preset
+            var envConfig = props?.EnvConfig ?? EnvironmentConfig.Development();
+
+            // imageTag: dùng để chỉ định Docker image version trên ECR.
+            // Set qua CLI: cdk deploy --context imageTag=v1.2.3
+            // Mặc định "latest" — nhớ push image lên ECR trước khi deploy.
+            var imageTag = this.Node.TryGetContext("imageTag") as string ?? "latest";
 
             // ── 1. Networking ─────────────────────────────────────────────────
             var networking = new NetworkingConstruct(this, "Networking");
@@ -71,7 +94,11 @@ namespace InfraCdk
             var storage = new StorageConstruct(
                 this,
                 "Storage",
-                new StorageConstructProps { IsProduction = isProduction }
+                new StorageConstructProps
+                {
+                    EnvConfig = envConfig,
+                    StaticBucketName = staticBucketName, // null → CDK tự sinh tên unique
+                }
             );
 
             // ── 4. Database (Aurora + RDS Proxy) ──────────────────────────────
@@ -86,7 +113,7 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     RdsSg = securityGroups.RdsSg,
-                    IsProduction = isProduction,
+                    EnvConfig = envConfig,
                 }
             );
 
@@ -103,9 +130,10 @@ namespace InfraCdk
                     PrivateSubnet1 = networking.PrivateSubnet1,
                     PrivateSubnet2 = networking.PrivateSubnet2,
                     EcsSg = securityGroups.EcsSg,
-                    DbSecret = database.AuroraCluster.Secret, // ISecret — auto-grant execution role
-                    DbProxyEndpoint = database.RdsProxy.Endpoint, // string token → env var DB_HOST
-                    IsProduction = isProduction, // #7: scale-down behavior
+                    DbSecret = database.AuroraCluster.Secret,
+                    DbProxyEndpoint = database.RdsProxy.Endpoint,
+                    EnvConfig = envConfig,
+                    ImageTag = imageTag, // #9: image tag từ ECR, set qua --context imageTag=<tag>
                 }
             );
 
@@ -130,7 +158,7 @@ namespace InfraCdk
                     TargetGroup = ecs.TargetGroup,
                     HostedZone = hostedZone,
                     DomainName = domainName,
-                    IsProduction = isProduction, // #8: DeletionProtection bật ở production
+                    EnvConfig = envConfig, // #8: DeletionProtection bật ở production
                 }
             );
 
@@ -146,8 +174,8 @@ namespace InfraCdk
                     HostedZone = hostedZone,
                     CustomHeaderName = loadBalancer.CustomHeaderName,
                     CustomHeaderValue = loadBalancer.CustomHeaderValue,
-                    // WAF ARN được truyền từ WafStack qua CrossRegionReferences
                     WafArn = props?.WafArn,
+                    StaticBucket = storage.StaticBucket, // #10: S3 behavior /static/*
                 }
             );
 
@@ -184,11 +212,13 @@ namespace InfraCdk
                     TargetGroup = ecs.TargetGroup,
                     AuroraCluster = database.AuroraCluster,
                     NotificationEmail = notificationEmail,
+                    EnvConfig = envConfig, // #7: env prefix cho tên resource
+                    Distribution = cloudFront.Distribution, // #11: CloudFront metrics
                 }
             );
 
             // Ngăn compiler cảnh báo unused variable
-            _ = cloudFront;
+            // cloudFront đã được dùng bên trên (cloudFront.Distribution)
             _ = bastion;
         }
     }

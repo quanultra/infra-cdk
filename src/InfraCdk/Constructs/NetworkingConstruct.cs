@@ -1,4 +1,6 @@
+using Amazon.CDK;
 using Amazon.CDK.AWS.EC2;
+using Amazon.CDK.AWS.Logs;
 using Constructs;
 
 namespace InfraCdk.Constructs
@@ -214,6 +216,31 @@ namespace InfraCdk.Constructs
                 {
                     Service = GatewayVpcEndpointAwsService.S3,
                     Subnets = new[] { privateSubnets },
+                }
+            );
+
+            // --- VPC Flow Logs ---
+            // #12: Log network traffic để audit security incidents và troubleshoot network issues.
+            // Chỉ log REJECT traffic để tiết kiệm chi phí — đủ để phát hiện lateral movement.
+            var flowLogGroup = new LogGroup(
+                this,
+                "VpcFlowLogGroup",
+                new LogGroupProps
+                {
+                    LogGroupName = "/vpc/flow-logs",
+                    Retention = RetentionDays.ONE_MONTH,
+                    RemovalPolicy = RemovalPolicy.DESTROY,
+                }
+            );
+
+            Vpc.AddFlowLog(
+                "VpcFlowLog",
+                new FlowLogOptions
+                {
+                    // Chỉ log REJECT để giảm volume log và chi phí
+                    // ACCEPT logs rất nhiều → tốn kém nếu traffic cao
+                    TrafficType = FlowLogTrafficType.REJECT,
+                    Destination = FlowLogDestination.ToCloudWatchLogs(flowLogGroup),
                 }
             );
         }
